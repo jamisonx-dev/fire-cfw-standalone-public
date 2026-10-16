@@ -1,0 +1,18 @@
+# ALLOW-LIST: this folder also holds Akai's firmware dumps and analysis of their code,
+# which must never be committed. Only our own firmware source and docs are tracked.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/FIRE_HARDWARE_MAP.md
+!/fw/
+
+# build outputs and scratch inside fw/
+fw/**/*.bin
+fw/**/*.elf
+fw/**/*.map
+fw/**/*.o
+fw/**/*.pbm
+fw/**/*.json
+fw/**/__pycache__/
+fw/hello/ref/

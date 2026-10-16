@@ -1,0 +1,26 @@
+[Unit]
+Description=ORC-1 -> Fire VU (the master's audio levels to the Akai Fire's pad VU bars; BROWSER > Lights > Pi VU bars)
+After=skipback-record.service
+
+[Service]
+Type=simple
+User=pibox
+WorkingDirectory=/home/pibox/fire_fw
+ExecStart=/usr/bin/python3 /home/pibox/fire_fw/host_vu.py
+Restart=on-failure
+RestartSec=5
+# Skipback comes first: this must never compete with the audio side. It only READS a ring from tmpfs.
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+MemoryMax=64M
+OOMScoreAdjust=900
+# It writes nothing: the whole filesystem is read-only to it (skipback's rings included); MIDI is /dev/snd, still open.
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

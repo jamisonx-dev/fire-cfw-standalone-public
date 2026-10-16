@@ -1,0 +1,64 @@
+"""Mutation check for wiring_test.py: undo each review fix in a temp copy; every one must turn the test red.
+    python3 wiring_mutate.py ."""
+import os, shutil, subprocess, sys, tempfile
+src = sys.argv[1]
+d = tempfile.mkdtemp()
+for f in ("main.c", "lights.c", "fire_hw.c", "wiring_test.py"):
+    shutil.copy(os.path.join(src, f), d)
+M = [  # (file, old, new)
+ ("main.c", "28, 29, 30, 31, 52, 53, 54, 55};", "28, 29, 30, 31, 32, 33, 34, 35};"),
+ ("main.c", "return grid_mpc(g) ? MPC_PANEL_CH :", "return grid_mpc(g) ? 10 :"),
+ ("main.c", "                    midi_send3((uint8_t)(0xB0 | ch), note, 127);", "                    midi_send3((uint8_t)(0x90 | ch), note, 127);"),
+ ("main.c", "                    dirty = true;\n                    continue;\n                }\n                if (rec_arm) record_hit", "                    dirty = true;\n                }\n                if (rec_arm) record_hit"),
+ ("main.c", "                midi_send3((uint8_t)(0xB0 | live[pad].chan), live[pad].note, 0);", "                midi_send3((uint8_t)(0x80 | live[pad].chan), live[pad].note, 0);"),
+ ("main.c", "    if (!quiet) return;\n    if (lt_slice == 0) {", "    if (!quiet || ext_playing) return;\n    if (lt_slice == 0) {"),
+ ("main.c", "if (!ctl_frame_due(now, lt_last_us)) return;", "if ((int32_t)(now - lt_last_us) < 33000) return;"),
+ ("main.c", "static void touched_global(void) { global_dirty = true; touched_lazy(); }", "static void touched_global(void) { global_dirty = true; }"),
+ ("main.c", "    commit_pending();                               /* live-play", "    /* live-play"),
+ ("main.c", "lights_next(1); commit_pending(); return true;", "lights_next(1); return true;"),
+ ("main.c", "save_due || save_lazy_due || save_run", "save_due || save_run"),
+ ("main.c", "            if (save_forced_run) save_force = true;     /* a SAVE NOW that failed", "            /* a SAVE NOW that failed"),
+ ("main.c", "if (converted) { save_due = ms_ticks + 3000; save_force = true; }", "if (converted) { save_due = ms_ticks + 3000; }"),
+ ("main.c", "        if (!h.len) break;", ""),
+ ("main.c", "    lt_by_host = lt_pinned = true;\n}", "}"),
+ ("main.c", "if (run) lt_input_ms = ms_ticks;", ""),
+ ("main.c", "    lt_input_ms = ms_ticks;                         /* the idle time counts from now", "    /* the idle time counts from now"),
+ ("main.c", "    lights_clear_bars();                            /* bars start empty", "    /* bars start empty"),
+ ("lights.c", "    if (st != bar_style) lights_clear_bars();", ""),
+ ("main.c", "ctl_cycle_due(G.lt_mode, lt_cur, lt_pinned,", "ctl_cycle_due(G.lt_mode, lt_cur, 0,"),
+ ("main.c", "    RTC->BKP14R = BUILD_ID;", "    /* (build id not stamped) */"),
+ ("main.c", "    mpu_ram_xn();                                   /* RAM is never code", "    /* RAM is never code"),
+ ("main.c", "    snap_take(f);\n", "\n"),
+ ("main.c", "static void __attribute__((noinline)) host_cmd(", "static void host_cmd("),
+ ("fire_hw.c", "    canary_watch_arm(out, in, CHAIN);\n", ""),
+ ("fire_hw.c", "    for (int i = 0; i < 3; i++)\n        if (w[i] == g)", "    for (int i = 0; i < 28; i++)\n        if (w[i] == g)"),
+ ("fire_hw.c", "    encoder_step();\n    canary_watch_disarm();", "    canary_watch_disarm();\n    encoder_step();"),
+ ("fire_hw.c", "DWT->FUNCTION0 = 6; return;", "DWT->FUNCTION0 = 5; return;"),
+ ("main.c", "    NVIC_SetPriority(DebugMonitor_IRQn, 0);", "    NVIC_SetPriority(DebugMonitor_IRQn, 2);"),
+ ("main.c", "            G.lt_idle = 0; G.lt_idle_v18 = 1;", "            G.lt_idle_v18 = 1;"),
+ ("main.c", "    if (surface_on) { surface_on = false; dirty = true; }   /* any mode button", "    /* any mode button"),
+ ("main.c", "rec_arm || surface_on,", "rec_arm,"),
+ ("main.c", "            if (held_t >= 0 && held_row < 0) { knob_page ^= 1; held_pad_turned = true; }", "            knob_page ^= 1; if (0) {"),
+ ("main.c", "{ knob_page ^= 1; held_pad_turned = true; }", "{ knob_page ^= 1; }"),
+ ("main.c", "    if (b == 0) return k == 0 ? KB_SWING : 16 + k;", "    if (b == 0) return 16 + k;"),
+ ("main.c", "!G.mark_off && (G.mark_space == 1 ? s % 16 == 0 : s % 4 == 0)", "(s % 4 == 0)"),
+ ("main.c", "{0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5};", "{0, 0, 0, 0, 0, 0, 5, 5, 0, 5, 5, 5, 5, 5, 5, 5};"),
+ ("main.c", '"Steps", "Hold step",', '"Steps", "Hold a step",'),
+ ("main.c", "surf_ch = (uint8_t)(h.arg - 1); surf_known = true;", "surf_ch = (uint8_t)(h.arg - 1);"),
+ ("main.c", "G.lt_speed = 64; G.lt_idle = 0;", "G.lt_speed = 64; G.lt_idle = 3;"),
+ ("main.c", "            surf_send(pad, vel);", "            midi_send3((uint8_t)(0x90 | surf_ch), (uint8_t)pad, vel);"),
+ ("main.c", "                surf_send(pad, 0);", "                midi_send3(0x8F, (uint8_t)pad, 0);"),
+]
+red = 0
+for fn, a, b in M:
+    p = os.path.join(d, fn); s = open(p, encoding="utf-8", newline="").read()
+    sn = s.replace("\r\n", "\n")
+    if a not in sn: print("NOT APPLIED:", a[:60]); continue
+    open(p, "w", encoding="utf-8", newline="").write(sn.replace(a, b, 1))
+    r = subprocess.run([sys.executable, os.path.join(d, "wiring_test.py")], capture_output=True, text=True)
+    ok = r.returncode != 0; red += ok
+    print("red  " if ok else "GREEN", a[:70].replace("\n", " "))
+    open(p, "w", encoding="utf-8", newline="").write(s)
+print(f"{red}/{len(M)} mutations red")
+shutil.rmtree(d)
+sys.exit(0 if red == len(M) else 1)   # a survivor (or a mutation that did not apply) fails the run
