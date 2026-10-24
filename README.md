@@ -4,11 +4,17 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 **The Akai Fire is now a standalone step sequencer and includes:**
 
--internal clock with external sync 
+-internal clock with clock out and external sync 
 
 -patterns, assignments, and settings are saved internally to the device
 
--32 patterns slots, each with easily variable lengths up to 128 steps per sequencer track 
+-step sequencer with 32 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step)
+
+-each individual sequencer track can be of any length from 1 to 128 steps and can be changed on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
+
+-accents,probability & ratchets: hold a step, then add or adjust the likelihood that it will sound and/or whether any ratcheting occurs and how much. accents can be adjusted by pressing shift+step and cycles between strong, soft, and normal.
+
+-32 patterns, autosaved after 3 sec as you write them. if a new pattern is selected, the change happens at the end of the bar, regardless of how many steps a given sequencer track may contain.
 
 -song mode, where you can string the patterns together however you wish
 
@@ -22,7 +28,7 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 -generally informative context on the oled
 
--4 banks of the four encoder knobs, assignable in the menu to whatever you want them to send
+-4 banks of the four encoder knobs for each of the main modes you're in, assignable in the menu to whatever you want them to send
 
 -button LED/pad lighting
 
