@@ -6,9 +6,9 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 -internal clock with clock out and external sync 
 
--patterns, assignments, and settings are saved internally to the device
+-patterns, assignments, and settings saved internally to the device memory
 
--step sequencer with 32 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step)
+-step sequencer with 40 tracks: 32 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step)
 
 -each individual sequencer track can be of any length from 1 to 128 steps and can be changed on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
 
@@ -33,6 +33,10 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 -button LED/pad lighting
 
 -send & receive MIDI over USB to anything that is capable of speaking the language
+
+
+A note here about some of the things one might find in addition:
+My personal copy of this firmware gets updated pretty often at this point and some of the features I put in for myself will leak into the public release. For example, pressing the DRUM key twice now goes into MPC mode, which is a map of my MPC1000 face buttons. It's a thing specific to me that I'm leaving until/unless this gets enough outside traction to make it worth removing. Another example is ORC mode, a menu option that brings up a surface specific to the ORC project. Poke around and you will find neat things, such as all the pretty visuals in lights mode.
 
 
 **I am genuinely proud of this and I hope that other people will find this helpful in some way.**
