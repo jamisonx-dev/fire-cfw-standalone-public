@@ -35,7 +35,7 @@ MUTS = [  # (name, old, new) in lights.c
     ("TRACKS: the bar falls at half speed", "hit_bar[c] - dt * 1.6f", "hit_bar[c] - dt * 0.8f"),
     ("TRACKS: a soft hit lowers an accent", "if (h > hit_bar[c]) hit_bar[c] = h;", "hit_bar[c] = h;"),
     ("TRACKS: tracks 16-23 not folded onto columns 0-7", "int c = track & 15;", "int c = track > 15 ? 0 : track;"),
-    ("TRACKS: track 24 accepted", "if (track < 0 || track > 23 || lv < 1) return;", "if (track < 0 || track > 24 || lv < 1) return;"),
+    ("TRACKS: track 32 accepted", "if (track < 0 || track > 31 || lv < 1) return;", "if (track < 0 || track > 32 || lv < 1) return;"),
     ("TRACKS: a normal hit is as tall as an accent", "lv == 2 ? 0.7f", "lv == 2 ? 1.0f"),
     ("snappy: falls twice as fast", "host_bar[c] - dt * 1.2f", "host_bar[c] - dt * 2.4f"),
     ("snappy: a higher level does not raise the bar", "if (h > host_bar[c]) host_bar[c] = h;", "(void)0;"),

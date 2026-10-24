@@ -4,25 +4,70 @@ Custom firmware that turns the Akai Fire into a **standalone step sequencer**. I
 lights itself and sends MIDI notes over USB to whatever it's plugged into (the ORC, a computer, a
 USB host). On USB it appears as **"ORC FW seq"**.
 
-Version described: **v0.21** (2026-10-14 night: ORC surface pads talk to the ORC by SysEx `0C`, no MIDI channel). **v0.20** (2026-10-14: knob banks on KNOB MODE, BROWSER menu pages Playing / Knobs / Display / Shortcuts / ORC surface, beat-mark settings). **v0.19**: ORC surface mode. **v0.18**: idle lights off by default. **v0.17** (2026-10-14: the 2026-10-13 review fixes wired in + host status 07). **v0.15** (2026-10-13; lights, menu, screens, PI VU and the heat looks were played and liked by the owner the same evening; the crash recorder came the same night). ("v0.16" is skipped: that name went to the parked HOST-mode firmware on branch `host-mode`.) v0.14 was (2026-10-07). Played and confirmed by the owner up to v0.11 ("This is awesome");
+Version described: **v0.29** (2026-10-24: **32 tracks** (T17-T24 added), **CC tracks**, **undo / redo**, the **roller / looper**; sections marked v0.29 below). **v0.21** (2026-10-14 night: ORC surface pads talk to the ORC by SysEx `0C`, no MIDI channel). **v0.20** (2026-10-14: knob banks on KNOB MODE, BROWSER menu pages Playing / Knobs / Display / Shortcuts / ORC surface, beat-mark settings). **v0.19**: ORC surface mode. **v0.18**: idle lights off by default. **v0.17** (2026-10-14: the 2026-10-13 review fixes wired in + host status 07). **v0.15** (2026-10-13; lights, menu, screens, PI VU and the heat looks were played and liked by the owner the same evening; the crash recorder came the same night). ("v0.16" is skipped: that name went to the parked HOST-mode firmware on branch `host-mode`.) v0.14 was (2026-10-07). Played and confirmed by the owner up to v0.11 ("This is awesome");
 v0.12 is a round of fixes from a code review (see the end of this guide).
 
 ## The layout
 
-- **24 tracks**: 16 drum tracks T1-T16 and 8 melodic tracks M1-M8 (below). A drum track plays one
-  note on one MIDI channel; the defaults are a GM drum
-  kit on channel 10 (36 kick, 38 snare, 42 / 46 hats, 39 clap, 37 rim, 41 / 45 / 48 toms, 49 crash,
-  51 ride, 56 cowbell, 54 tambourine, 70, 75, 63). The firmware never guesses what a note sounds
-  like: that depends on where it's sent.
+- **32 tracks** (v0.29): 24 drum tracks T1-T24 and 8 melodic tracks M1-M8 (below). Scrolling down the
+  list: T1-T16, T17-T24, then M1-M8. A drum track plays one note on one MIDI channel (or sends a CC: see
+  CC tracks); the defaults are a GM drum kit on channel 10 (36 kick, 38 snare, 42 / 46 hats, 39 clap,
+  37 rim, 41 / 45 / 48 toms, 49 crash, 51 ride, 56 cowbell, 54 tambourine, 70, 75, 63), and T17-T24 on
+  notes 60, 61, 62, 64, 65, 66, 67, 68 on channel 10. The firmware never guesses what a note sounds
+  like: that depends on where it's sent. Patterns saved by v0.28 or older load unchanged, with T17-T24 empty.
 - **Up to 128 steps** per track, and **each track has its own length**, so tracks of different
   lengths drift against each other (polyrhythms).
 - **32 patterns.** Each pattern keeps its own steps and track lengths, and has a colour. Track sounds
   (note, channel) and mutes are shared by all patterns, like a kit.
 - The **pads show 4 tracks x 16 steps** at a time. Scroll through the tracks and page through the steps.
 
+## CC tracks (v0.29)
+
+Any drum track (T1-T24) can send a **CC instead of a note**: hold its row button and turn **knob 4** clockwise
+(back = a note track again). The screen's top line says `1D CC` / `1D note`. On a CC track:
+
+- **knob 2** (row held) picks the CC number (1-127), on the track's channel (knob 1);
+- each lit step sends that CC once, with the value of the step's **knob 2 on page 2** (hold the step, KNOB MODE
+  for page 2; no lock CC needed), or, if it has none, its level's velocity (soft 60, normal 100, accent 127);
+- ratchets, gate, TIE / SLIDE and the track volume do nothing (a CC has no length); chance and conditions work;
+- recorded DRUM-mode hits never go onto a CC track.
+
+## Undo (v0.29)
+
+**SHIFT + REC** puts a pattern's steps and track lengths back to how they were before its last edit, and says
+`undo P3` on the screen. Press it again to **redo** (`redo P3`). One edit is:
+
+- one step pad from press to release, including every knob turn while it was held;
+- one SHIFT + pad (velocity) or ALT + pad (length) tap;
+- one ALT + PATTERN copy (undo gives back the pattern it copied INTO);
+- a whole **REC take**: from the first recorded hit until REC goes off or playing stops.
+
+Holding a step just to look at it doesn't count as an edit. Undo covers only steps and lengths, not settings
+(channels, notes, mutes, tempo, CC tracks). It holds one pattern of up to about 330 drum / 160 melodic steps;
+a bigger one says `undo: too big`. It is lost at power-off.
+
+## The roller / looper (v0.29)
+
+Like the BeatStep Pro's: **hold KNOB MODE and the pads become the roller** (after a moment the pads change; a
+quick tap of KNOB MODE still steps the knob bank). Hold a roller pad and the track(s) repeat; let go and they
+carry on **exactly where they would have been**, because the sequencer's own count never stopped.
+
+| Pads in each row | Do |
+|---|---|
+| Left 8 (amber, then cyan) | **all tracks** |
+| Right 8 (that row's track colour) | **only the track on that row** |
+| Left to right in each half | **1 bar, 1/2, 1/4, 1/8, 1/16** = loop that many steps (16 / 8 / 4 / 2 / 1) from the step about to play; then **1/32, 1/48, 1/64** = that step repeated 2 / 3 / 4 times per step (1/48 = sixteenth triplets) |
+
+- Once a roller pad is down, KNOB MODE may be let go: the roll lasts while the pad is held.
+- Several pads at once: a track's own pad beats the all-tracks ones; the newest pad wins. Sliding to another
+  length keeps the loop's start.
+- The playhead shows where a rolling track really is; the row's green side light = that track is rolling.
+- It follows swing and an external clock (the same timing as normal playback). Recording while rolling records
+  at the real position.
+
 ## Melodic tracks M1-M8 (v0.9)
 
-Below T16 come **8 melodic tracks, M1-M8** (scroll down with SELECT; the track list says "mel").
+Below T24 come **8 melodic tracks, M1-M8** (scroll down with SELECT; the track list says "mel").
 On a melodic track **every step has its own note**; T1-T16 stay drum tracks (one note per track).
 
 | Do | Gets |
@@ -102,8 +147,8 @@ next slot, looping at the end. The song ends at the first empty slot.
 
 | Do | Gets |
 |---|---|
-| PATTERN/SONG | song mode on / off (green LED = on). Turned on while playing, the song joins at the next bar. |
-| SHIFT + PATTERN/SONG | open / close the song editor (yellow LED blinks) |
+| PATTERN/SONG | open / close the song editor (yellow LED blinks). Changed 2026-10-19: this used to be SHIFT + it. |
+| SHIFT + PATTERN/SONG | song mode on / off (green LED = on). Turned on while playing, the song joins at the next bar. Changed 2026-10-19: this used to be a plain tap. |
 | In the editor: top row | select a slot (white). A dim pad marks where the next slot can go. |
 | In the editor: rows 2 and 3 | the selected slot's pattern: 1-16, 17-32 (coloured; empty patterns grey) |
 | In the editor: bottom row, pads 1-8 | the selected slot's number of bars |
@@ -123,19 +168,21 @@ slot 2 of 4, pattern 3, bar 1 of 2.
 | SHIFT + SELECT turn | tempo +-1 BPM (add ALT: +-10), 40-300 |
 | Knob 1 | swing 50-75 % (delays every second 16th) |
 | SHIFT + PLAY | MIDI clock out on / off |
+| **ALT + STEP**, tapped (v0.24) | **Tap tempo.** Tap the beat: the 2nd tap sets the tempo (the big number pops up) and every further tap refines it, averaged over the last 8 taps so a sloppy tap barely moves it. A pause of over 2 s starts a new count (the first tap of a count changes nothing); a sudden big change of speed (or a missed or very late tap) restarts the count instead of averaging two tempos, and the OLD tempo stays until a 3rd tap confirms the new one (so one sloppy tap never flashes a wrong tempo); two taps under 150 ms apart count as one. Does nothing while an external clock drives the tempo. A plain STEP is unchanged. |
 
 ### Tracks
 
 | Do | Gets |
 |---|---|
-| Tap a row button | mute / unmute that track (red side LED = muted) |
+| Tap a row button | mute / unmute that track (red side LED = muted). Several rows can be pressed together: each one mutes (2026-10-19; before, only the last one pressed did) |
 | Hold a row button + knob 1 | that track's MIDI channel (1-16, default 10) |
-| Hold a row button + knob 2 | that track's note (shown as a note name and number, e.g. C2 (36); 60 = C4) |
+| Hold a row button + knob 2 | that track's note (shown as a note name and number, e.g. C2 (36); 60 = C4); on a CC track its CC number |
+| Hold a row button + knob 4 (v0.29) | drum tracks: a note track or a **CC track** (above) |
 
 ### The free knobs: 4 banks (v0.20)
 
-When nothing is held, the four knobs do what the current **bank** says. **KNOB MODE** (nothing held) steps
-banks 1 -> 2 -> 3 -> 4 -> 1; the four little lights next to it (CHANNEL, MIXER, USER 1, USER 2) show which.
+When nothing is held, the four knobs do what the current **bank** says. **KNOB MODE** (nothing held), tapped,
+steps banks 1 -> 2 -> 3 -> 4 -> 1 when it is let go (v0.29: held, it is the roller); the four little lights next to it (CHANNEL, MIXER, USER 1, USER 2) show which.
 (While you **hold a step**, KNOB MODE still flips that step's knob page, and the lights show the page.)
 
 | Bank | Out of the box |
@@ -149,6 +196,11 @@ Set any knob up in **BROWSER > Knobs**: it sends **swing**, **tempo**, or **CC 1
 **relative** (65 = one step clockwise, 63 = one step back) or **absolute** (the knob moves a value 0-127 and sends
 it; it starts at 64 after power-up). Saved. Works with any gear; on the ORC, a knob's CC can be mapped to a named
 module's parameter on `/pads` like a pad.
+
+**Each section has its own banks (v0.29):** STEP, NOTE, DRUM and the MPC remote each keep their own 4 banks and
+their own current bank, so the knobs can do something different in each. KNOB MODE steps the bank of the section
+you are in, and the lights show it. BROWSER > Knobs opens on the section you were in (its **Section** line picks
+another). After the update all four start as copies of the banks you had, so nothing changes until you edit one.
 
 ## Live play: STEP / NOTE / DRUM (v0.8)
 
@@ -178,9 +230,11 @@ A note played here also becomes that track's current note, so steps tapped in af
 ### DRUM mode
 
 Each group has its own **MIDI channel** (defaults 10, 1, 2, 3) and **map**: **notes** (16 notes up from
-pad 1's note, default 36) or **MPC pads** (since 2026-10-15): each pad presses the MPC's own pad through
+pad 1's note, default 36), **16 levels** (v0.29: like the MPC's, all 16 pads play the group's ONE note, pad 1
+softest (velocity 8) up to pad 16 = 127 in even steps, SHIFT does nothing; the pads light dim to bright; a recorded
+hit lands at the nearest step level: soft / normal / accent) or **MPC pads** (since 2026-10-15): each pad presses the MPC's own pad through
 the owner's JJOS2XL front-panel remote map, **CC on channel 14**: pads 1-12 = CC 20-31, pads 13-16 = CC
-52-55 (bank A), 127 on press, 0 on release. That works on any MPC screen (NEXT SEQ, 16 levels ...); to just
+52-55 (the MPC's physical pads), 127 on press, 0 on release. That works on any MPC screen (NEXT SEQ, 16 levels ...); to just
 play an MPC program's sounds, use notes on its channel. MPC pad presses are controls: they are never recorded,
 and the group's channel is fixed at 14 while it's on MPC pads. So each group can drive a different box (ORC
 drums, MPC, SP-404 ...). (In the code a group is still called a grid.)
@@ -189,9 +243,23 @@ drums, MPC, SP-404 ...). (In the code a group is still called a grid.)
 |---|---|
 | ALT + tap a group | choose the group to edit (the others dim) |
 | ALT held + knob 1 | its channel (not on MPC pads: always 14) |
-| ALT held + knob 2 | pad 1's note (switches the group to notes) |
-| ALT held + knob 3 | map: clockwise = MPC pads, back = notes |
+| ALT held + knob 2 | pad 1's note (on 16 levels: the note all 16 pads play; MPC pads switch back to notes) |
+| ALT held + knob 3 | map, clockwise: notes -> 16 levels -> MPC pads |
 | REC | record on / off (yellow LED) |
+| DRUM again | the **MPC remote** (below), and back (the DRUM light blinks while it's up) |
+
+**The MPC remote** (v0.28): the whole MPC1000 / JJOS2XL front panel on the 64 pads, the owner's layout of his
+remote map, all on **channel 14**. Each pad is that MPC button: press = note on / CC 127, release = note off /
+CC 0, never recorded. The 16 pads at the left are the MPC's physical pads, so they do whatever the MPC's
+screen makes them do. Each button has its own colour (the owner's picks: pads blue, banks amber, pad buttons orange,
+F-keys indigo / purple alternating, REC + OVERDUB + UNDO SEQ red, nav white ...); white while held. The Q-sliders aren't on it.
+
+| Row (top first) | Columns 1-4 | 5-8 | 9-10 | 11-16 |
+|---|---|---|---|---|
+| 1 | pads 13-16 | TAP, ERASE, UNDO SEQ, NUMERIC | FULL LEVEL, BANK A | F1-F6 |
+| 2 | pads 9-12 | MODE, MAIN, WINDOW, AFTER 1 | 16 LEVELS, BANK B | -, STEP back, STEP forward, -, -, - |
+| 3 | pads 5-8 | DATA -, up, DATA +, AFTER 2 | NEXT SEQ, BANK C | -, LOCATE back, LOCATE forward, -, -, PLAY START |
+| 4 | pads 1-4 | left, down, right, SHIFT | TRACK MUTE, BANK D | -, -, REC, OVERDUB, STOP, PLAY |
 
 **Recording:** with REC on and the sequencer playing, each hit is written at the step it's nearest to
 **by when that step sounds** (with swing, odd steps sound later, and a hit just behind one belongs to
@@ -213,7 +281,7 @@ mode it only lights.
 **Tap PERFORM** to open the faders (its yellow light is on); tap it again, or press STEP / NOTE / DRUM,
 to go back. (**Holding** PERFORM is still FILL; its red light shows that.)
 
-Up to **32 faders**, 4 rows at a time. Each row is one fader in its own colour, lit up to its level.
+Up to **32 faders**, 4 rows at a time. Each row is one fader in its own colour, lit up to its level (the pads are bright up to the level and the pad AT the level is dim; everything above it is dark; at level 0 the first pad is the dim one; changed 2026-10-19).
 Each fader sends one CC on one channel.
 
 | Do | Gets |
@@ -235,7 +303,7 @@ next save (moving a fader doesn't start one by itself); adding, removing and set
 
 - **Line 1:** pattern (and the queued one, e.g. `PAT 3>4`) or the song line, then the tempo. A `*` in
   the corner means there are unsaved changes.
-- **Line 2:** a PLAY / STOP icon, what you're looking at (`P1/4` = step page 1 of 4, `FADERS`,
+- **Line 2:** a PLAY / STOP icon, what you're looking at (`P1/8` = step page 1 of 8, the 128-step maximum; it is the step page, not a pattern number, `FADERS`,
   `NOTE`, `DRUM`, `T2 step 5`), the last action (a new length, a knob's CC; cut to fit), `sw58` only
   when swing isn't 50, and `out` / `ext` when the clock isn't internal.
 - **The step view:** the 4 visible tracks, one row each: a dot per step (small = off, bigger dot on
@@ -298,9 +366,10 @@ menu from the top page.
 |---|---|
 | **Autosave** | ON / OFF (see Saving). |
 | **ORC mode** | the ORC's pad layout again (see the ORC's `/pads`). |
-| **Playing >** | **Tempo** (SHIFT = steps of 10), **Swing**, **Clock out** on / off: the same values SHIFT + SELECT, knob 1 and SHIFT + PLAY change. |
-| **Knobs >** | **Bank** (the current one; same as KNOB MODE), **Knob** 1-4 to set up, then what it **Sends** (swing, tempo, CC 1-127; SHIFT = steps of 10), its **Channel**, its **Mode** (relative / absolute). |
+| **Playing >** | **Tempo** (SHIFT = steps of 10), **Swing**, **Clock out** on / off: the same values SHIFT + SELECT, knob 1 and SHIFT + PLAY change. **Pad release** (v0.28; off / 10 / 20 / 30 / 40 / 60 ms, default 20): how long a pad you play live (NOTE, DRUM, MPC pads, the ORC surface) must stay up before its release counts. A pad that flickers as you land on it or roll off it no longer plays a second hit; back down sooner = the same hit. The press itself is never delayed. Raise it if hits still double, lower it for very fast repeats on one pad. |
+| **Knobs >** | **Section** (v0.29: step / note / drum / MPC; it opens on the one the pads are in), **Bank** (that section's current one; same as KNOB MODE), **Knob** 1-4 to set up, then what it **Sends** (swing, tempo, CC 1-127; SHIFT = steps of 10), its **Channel**, its **Mode** (relative / absolute). |
 | **Display >** | **Beat marks** on / off, their **Colour** (blue, white, red, green, yellow, purple, cyan) and **Spacing**: every beat (4 steps), every bar (16), or beat+bar (the bar mark brighter). They use the pads' lowest brightness. |
+| **Memory >** (v0.26) | Read-only: **Drum steps left**, **Note steps left** and **Memory used**: how many more lit steps still fit in the pool all 32 patterns share before the screen says FULL (a drum step takes 3 bytes, a melodic step 6; a pattern counts as the larger of what it holds now and what is saved). |
 | **Shortcuts >** | read-only cheat sheets: Steps, Hold a step, Hold a row, Patterns, Song editor, Playing, Note mode, Drum mode, Faders, Knobs. SELECT scrolls, BROWSER goes back. |
 | **Save now** | writes anything waiting; says `saving...` or `nothing new`. |
 | **Lights >** | opens the lights page: |

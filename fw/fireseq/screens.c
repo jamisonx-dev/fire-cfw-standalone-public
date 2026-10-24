@@ -93,6 +93,20 @@ void scr_faders(const scr_fader_t f[4])
     }
 }
 
+void scr_levels(const char *const name[4], const uint8_t val[4], const uint8_t muted[4])
+{
+    char b[24];
+    for (int r = 0; r < 4; r++) {
+        int y = row_y(r);
+        draw_text(0, y, name[r], 1);
+        bar(24, 82, y, val[r], 127);
+        if (muted[r]) draw_text(88, y, "M", 1);
+        put_int(b, val[r] * 100 / 127);
+        draw_text(128 - ((int)strlen(b) + 1) * 6, y, b, 1);
+        draw_text(122, y, "%", 1);
+    }
+}
+
 void scr_step_bars(const scr_step_t *s)
 {
     char b[24];

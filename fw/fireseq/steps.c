@@ -14,7 +14,7 @@ enum { D_B = 0, D_COND = 1, D_LOCK = 2 };
 enum { M_B = 0, M_NOTE = 1, M_COND = 2, M_LOCK = 3, M_CH2 = 4, M_CH3 = 5 };
 
 static inline int blk(int p, int t) { return p * ST_TRACKS + t; }
-static inline bool mel(int t) { return t >= ST_MEL_FIRST; }
+static inline bool mel(int t) { return st_mel(t); }
 static inline uint32_t esize(int t) { return mel(t) ? ST_MEL_SIZE : ST_DRUM_SIZE; }
 static inline bool ok(int p, int t, int s) { return p >= 0 && p < ST_PATTERNS && t >= 0 && t < ST_TRACKS && s >= 0 && s < ST_MAXSTEPS; }
 static inline bool lit(int p, int t, int s) { return map[p][t][s >> 5] >> (s & 31) & 1u; }
@@ -43,6 +43,18 @@ static bool fits(int p, uint32_t new_size)
         total += live > sv ? live : sv;
     }
     return total <= ST_POOL;
+}
+
+/* Pool bytes still free by the same rule fits() uses (each pattern counts as the larger of its live size and its saved
+   record): a new lit step is refused exactly when this is smaller than its entry (3 bytes drum, 6 melodic). */
+uint32_t steps_room(void)
+{
+    uint32_t total = 0;
+    for (int q = 0; q < ST_PATTERNS; q++) {
+        uint32_t live = live_size(q), sv = steps_saved[q];
+        total += live > sv ? live : sv;
+    }
+    return total >= ST_POOL ? 0 : ST_POOL - total;
 }
 
 /* open n bytes at pool position pos; blocks after block k move up */
@@ -162,10 +174,10 @@ void steps_record_read(int p, uint32_t o, uint8_t *dst, uint32_t n)
     for (uint32_t i = 0; i < n; i++, o++) {
         uint8_t v;
         if (o >= len) v = 0xFF;
-        else if (o == 0) v = 2;                     /* format */
+        else if (o == 0) v = 3;                     /* format */
         else if (o == 1) v = ST_DRUM_SIZE;
         else if (o == 2) v = ST_MEL_SIZE;
-        else if (o == 3) v = 0;
+        else if (o == 3) v = ST_TRACKS;
         else if (o < 4 + ST_TRACKS) v = steps_len[p][o - 4];
         else if (o < ST_REC_HDR) { uint32_t m = o - 4 - ST_TRACKS; v = (uint8_t)(map[p][m / 16][m % 16 / 4] >> (8 * (m % 4))); }
         else v = pool[off[blk(p, 0)] + o - ST_REC_HDR];
@@ -173,13 +185,23 @@ void steps_record_read(int p, uint32_t o, uint8_t *dst, uint32_t n)
     }
 }
 
-/* Load lengths + maps + entries of size dsz (drum) / msz (melodic): each entry's first
-   min(stored, current) bytes are kept and the rest zeroed (fields are only ever appended). */
-static bool load_body(int p, const uint8_t *lens, const uint8_t *maps, const uint8_t *d, uint32_t dlen, uint32_t dsz, uint32_t msz)
+uint32_t steps_record_copy(int p, uint8_t *dst)
 {
-    if (!dsz || !msz) return false;
+    uint32_t len = steps_record_len(p);
+    steps_record_read(p, 0, dst, ST_REC_HDR);       /* the head + lengths + maps (small) */
+    memcpy(dst + ST_REC_HDR, pool + off[blk(p, 0)], len - ST_REC_HDR);
+    return len;
+}
+
+/* Load lengths + maps + entries of size dsz (drum) / msz (melodic) for the record's first nt tracks (the rest
+   start empty): each entry's first min(stored, current) bytes are kept and the rest zeroed (fields are only
+   ever appended). */
+static bool load_body(int p, int nt, const uint8_t *lens, const uint8_t *maps, const uint8_t *d, uint32_t dlen, uint32_t dsz, uint32_t msz)
+{
+    if (!dsz || !msz || nt < 1 || nt > ST_TRACKS) return false;
     uint32_t m[ST_TRACKS][4], have = 0, need = 0;
-    for (int t = 0; t < ST_TRACKS; t++) {
+    memset(m, 0, sizeof m);
+    for (int t = 0; t < nt; t++) {
         for (int w = 0; w < 4; w++) {
             const uint8_t *q = maps + t * 16 + w * 4;
             m[t][w] = (uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24;
@@ -188,7 +210,7 @@ static bool load_body(int p, const uint8_t *lens, const uint8_t *maps, const uin
         need += count4(m[t]) * esize(t);
     }
     if (have != dlen) return false;                 /* maps and data disagree */
-    for (uint32_t i = 0, t = 0; t < ST_TRACKS; t++) {   /* every stored step must be lit (level != 0) */
+    for (uint32_t i = 0, t = 0; t < (uint32_t)nt; t++) {   /* every stored step must be lit (level != 0) */
         uint32_t sz = mel((int)t) ? msz : dsz, c = count4(m[t]);
         for (uint32_t j = 0; j < c; j++, i += sz) if (!(d[i] & 3)) return false;
     }
@@ -205,20 +227,27 @@ static bool load_body(int p, const uint8_t *lens, const uint8_t *maps, const uin
         for (uint32_t j = 0; j < c; j++, src += sz, dstp += e) memcpy(pool + dstp, d + src, k);
     }
     memcpy(map[p], m, sizeof m);
-    for (int t = 0; t < ST_TRACKS; t++) steps_len[p][t] = lens[t] <= ST_MAXSTEPS ? lens[t] : 0;
+    for (int t = 0; t < ST_TRACKS; t++) steps_len[p][t] = t < nt && lens[t] <= ST_MAXSTEPS ? lens[t] : 0;
     return true;
 }
 
 bool steps_record_load(int p, const uint8_t *rec, uint32_t len)
 {
-    if (p < 0 || p >= ST_PATTERNS || len < ST_REC_HDR || rec[0] != 2) return false;
-    return load_body(p, rec + 4, rec + 4 + ST_TRACKS, rec + ST_REC_HDR, len - ST_REC_HDR, rec[1], rec[2]);
+    if (p < 0 || p >= ST_PATTERNS || len < 4) return false;
+    int nt;
+    if (rec[0] == 3) nt = rec[3];                   /* v3: the record says how many tracks it holds */
+    else if (rec[0] == 2 && rec[3] == 0) nt = ST_TRACKS_V2;
+    else return false;
+    if (nt < 1 || nt > ST_TRACKS) return false;     /* (more tracks than this firmware has: refused, never cut) */
+    uint32_t hdr = 4u + (uint32_t)nt * 17u;
+    if (len < hdr) return false;
+    return load_body(p, nt, rec + 4, rec + 4 + nt, rec + hdr, len - hdr, rec[1], rec[2]);
 }
 
 bool steps_record_load_v1(int p, const uint8_t *rec, uint32_t len)
 {
     if (p < 0 || p >= ST_PATTERNS || len < ST_REC_HDR_V1) return false;
-    return load_body(p, rec, rec + ST_TRACKS, rec + ST_REC_HDR_V1, len - ST_REC_HDR_V1, 1, 2);
+    return load_body(p, ST_TRACKS_V2, rec, rec + ST_TRACKS_V2, rec + ST_REC_HDR_V1, len - ST_REC_HDR_V1, 1, 2);
 }
 
 /* ---------- old full-size saves ---------- */
@@ -237,7 +266,7 @@ bool steps_convert_full(int p, const uint8_t *r, uint32_t len)
         }
     }
     if (len >= 4120u)                               /* v0.9 melodic part: len_m @2064, step_m @2072, note_m @3096 */
-        for (int i = 0; i < (ST_TRACKS - ST_MEL_FIRST); i++) {
+        for (int i = 0; i < (ST_MEL_END - ST_MEL_FIRST); i++) {
             steps_len[p][ST_MEL_FIRST + i] = r[2064 + i] <= ST_MAXSTEPS ? r[2064 + i] : 0;
             for (int s = 0; s < ST_MAXSTEPS; s++) {
                 uint8_t b = r[2072 + i * ST_MAXSTEPS + s];

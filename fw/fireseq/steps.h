@@ -12,12 +12,15 @@
  * Condition 0 = none (codes: see main.c). Lock 0 = none, else CC value + 1.
  * Chord: signed semitones from the step's note, 0 = no extra note.
  *
- * Saved record of one pattern (v2, kinds 17-24):
- *   [0] format 2  [1] drum entry size  [2] melodic entry size  [3] 0
- *   [4 .. 27]    track lengths (1-128, 0 = 16)
- *   [28 .. 411]  lit-step maps, 24 tracks x 4 little-endian 32-bit words
- *   [412 .. ]    the pattern's pool data
- * v1 records (v0.10, kinds 9-16) have no 4-byte head and entries of 1 / 2 bytes.
+ * Tracks (v0.29): 0-15 = T1-T16 (drum), 16-23 = M1-M8 (melodic), 24-31 = T17-T24 (drum entries again).
+ *
+ * Saved record of one pattern (v3, v0.29, kinds 17-48):
+ *   [0] format 3  [1] drum entry size  [2] melodic entry size  [3] track count N (32)
+ *   [4 .. 4+N)          track lengths (1-128, 0 = 16)
+ *   [4+N .. 4+17N)      lit-step maps, N tracks x 4 little-endian 32-bit words
+ *   [4+17N .. ]         the pattern's pool data
+ * v2 records (v0.11-v0.28) are the same with format 2 and [3] = 0 = 24 tracks: they load with tracks 24-31 empty.
+ * v1 records (v0.10, kinds 9-16) have no 4-byte head and entries of 1 / 2 bytes (24 tracks).
  */
 #ifndef STEPS_H
 #define STEPS_H
@@ -25,14 +28,18 @@
 #include <stdbool.h>
 
 #define ST_PATTERNS 32
-#define ST_TRACKS 24
+#define ST_TRACKS 32
 #define ST_MEL_FIRST 16                             /* tracks 16-23 are melodic */
+#define ST_MEL_END 24                               /* (24-31: drum entries) */
+#define ST_TRACKS_V2 24                             /* tracks in a v1 / v2 record */
 #define ST_MAXSTEPS 128
 #define ST_POOL 20480u                              /* bytes shared by all patterns' lit steps */
 #define ST_DRUM_SIZE 3u
 #define ST_MEL_SIZE 6u
-#define ST_REC_HDR (4 + ST_TRACKS + ST_TRACKS * 16) /* 412: head + lengths + maps */
-#define ST_REC_HDR_V1 (ST_TRACKS + ST_TRACKS * 16)  /* 408 */
+#define ST_REC_HDR (4 + ST_TRACKS + ST_TRACKS * 16) /* 548: head + lengths + maps */
+#define ST_REC_HDR_V2 (4 + ST_TRACKS_V2 + ST_TRACKS_V2 * 16)   /* 412 */
+#define ST_REC_HDR_V1 (ST_TRACKS_V2 + ST_TRACKS_V2 * 16)       /* 408 */
+static inline bool st_mel(int t) { return t >= ST_MEL_FIRST && t < ST_MEL_END; }
 
 typedef struct {
     uint8_t b;                                      /* step byte; level 0 = off */
@@ -59,15 +66,17 @@ bool steps_set_byte(int p, int t, int s, uint8_t b);   /* change the step byte o
 bool steps_copy_pattern(int src, int dst);          /* steps + lengths; false = no room (dst unchanged) */
 bool steps_track_empty(int t);                      /* no lit step in any pattern */
 uint32_t steps_used(void);                          /* pool bytes in use */
+uint32_t steps_room(void);                          /* pool bytes still free, by the rule that refuses a new step (see steps.c) */
 uint32_t steps_pattern_size(int p);                 /* pool bytes pattern p uses now */
 /* Data bytes of each pattern's newest saved record, kept by main.c (after a save, a load, a
    compaction). Every room check counts a pattern as max(live, saved), so whatever is in flash
    always fits back into the pool at boot. steps_clear_all leaves it alone. */
 extern uint16_t steps_saved[ST_PATTERNS];
 
-uint32_t steps_record_len(int p);                   /* v2 record */
+uint32_t steps_record_len(int p);                   /* v3 record */
 void steps_record_read(int p, uint32_t off, uint8_t *dst, uint32_t n);   /* bytes past the end read 0xFF */
-bool steps_record_load(int p, const uint8_t *rec, uint32_t len);       /* v2; false = malformed or no room */
+uint32_t steps_record_copy(int p, uint8_t *dst);    /* the whole record at once (steps_record_len bytes), fast; returns its length */
+bool steps_record_load(int p, const uint8_t *rec, uint32_t len);       /* v3 or v2; false = malformed or no room (nothing changed) */
 bool steps_record_load_v1(int p, const uint8_t *rec, uint32_t len);    /* v0.10's records */
 /* An old full-size pattern record (v0.4-v0.8: 2064 bytes, v0.9: 4120), e.g. read in place from flash.
    false = the pool ran out (what fit is kept). */

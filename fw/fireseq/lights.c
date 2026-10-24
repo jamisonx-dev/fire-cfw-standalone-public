@@ -146,7 +146,7 @@ void lights_clear_bars(void)
 
 void lights_hit(int track, int lv)
 {
-    if (track < 0 || track > 23 || lv < 1) return;
+    if (track < 0 || track > 31 || lv < 1) return;     /* (v0.29: 32 tracks; columns repeat every 16) */
     int c = track & 15;
     float h = lv >= 3 ? 1.0f : lv == 2 ? 0.7f : 0.4f;
     if (h > hit_bar[c]) hit_bar[c] = h;

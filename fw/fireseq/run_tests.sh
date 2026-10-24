@@ -26,6 +26,15 @@ c screens_test $W screens_test.c screens.c draw.c
 c steps_test   -O2 -Wall -fsanitize=bounds -fsanitize-undefined-trap-on-error steps_test.c steps.c
 c play_test    $W play_test.c play.c
 c store2_test  -O2 -Wall store2_test.c store2.c store.c
+# the owner's REAL save areas (read off the Fire): the oldest formats, and his patterns as v0.28 saved them (v2 records).
+# They are personal dumps, not in this repo: without them this step is skipped (read one off your own Fire with
+# dfu-util -a 0 -s 0x08020000:131072 -U <file>, in update mode, and put it there to run it).
+if gcc -O2 -Wall -fsanitize=bounds -fsanitize-undefined-trap-on-error convert_test.c steps.c store2.c -o "$T/convert_test" 2>"$T/ct.err"; then
+    for a in sector5_before_v010.bin sector5_v028b_20261023.bin; do
+        if [ -f "$HOME/fire_fw/$a" ]; then run "conv_${a%%_2*}" "$T/convert_test" "$HOME/fire_fw/$a"
+        else printf '%-14s SKIP  (no %s here)\n' "convert" "$a"; fi
+    done
+else printf '%-14s FAIL  (does not build: %s)\n' convert_test "$(head -1 "$T/ct.err")"; fail=1; fi
 run lights_vs_orc sh -c "'$T/lights_test' dump | python3 lights_vs_orc.py $HOME/orc/orc1/orc1_fire.py"
 run wiring_test   python3 -B wiring_test.py
 run menu_render   python3 -B menu_render.py "$T/menu_png"

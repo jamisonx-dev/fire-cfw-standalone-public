@@ -1,7 +1,9 @@
 /* "ORC FW seq" v0.14: the Fire as a standalone step sequencer + live pads, ORC-style controls.
  *
- * 24 tracks x up to 128 steps, each track with its OWN length (polyrhythms), 8 patterns, all saved.
- *   T1-T16 drum tracks (one note each); M1-M8 melodic tracks (every step has its own note).
+ * 32 tracks x up to 128 steps, each track with its OWN length (polyrhythms), 32 patterns, all saved.
+ *   T1-T24 drum tracks (one note each, or a CC: hold row + knob 4); M1-M8 melodic tracks (every step has its own note).
+ *   SHIFT + REC       undo the last edit of a pattern's steps (again = redo)
+ *   hold KNOB MODE + pad  the ROLLER: left 8 pads all tracks, right 8 that row's track (1 bar .. 1/16 loops, 1/32 - 1/64 rolls)
  *   Pads              4 visible tracks x 16 visible steps: tap toggles a step
  *   SHIFT + pad       velocity tier on a lit step: accent (127) -> soft (60) -> normal (100)
  *   ALT + pad         that track's length = up to this step (1-128)
@@ -15,8 +17,8 @@
  *   SHIFT + PATTERN   scroll tracks a page (4 rows)
  *   PATTERN up/down   pattern 1-32 (queued to the 16-step bar while playing); ALT + it = duplicate into it
  *   hold PATTERN      the pattern picker: tap one of patterns 1-32 (top two rows); knob 1 = its colour
- *   PLAY / STOP       start-stop / stop + rewind;  SHIFT + PLAY = MIDI clock out on/off
- *   PATTERN/SONG      song mode on/off;  SHIFT + it = song editor (top row slots, 2nd row pattern | bars)
+ *   PLAY / STOP       start-stop / stop + rewind;  SHIFT + PLAY = MIDI clock out on/off;  ALT + STEP (tapped) = tap tempo
+ *   PATTERN/SONG      the song editor (top row slots, 2nd row pattern | bars);  SHIFT + it = song mode on/off
  *   Row buttons       tap = mute that track; hold + knob 1 = its channel, hold + knob 2 = its note
  *   Knob 1            swing 50-75 %      Knobs 2-4: relative CC 17-19 on channel 1 (65 = +1, 63 = -1)
  *   STEP / NOTE / DRUM  what the pads do: edit steps / play a keyboard / play the 16 tracks (the sequencer keeps running)
@@ -62,8 +64,10 @@ __attribute__((used)) static const char BUILD_TAG[] = "ORCBUILD=" BUILD_ID_STR;
 #include <math.h>
 
 #define DTRACKS 16                                  /* drum tracks T1-T16: one note per track */
-#define MTRACKS 8                                   /* melodic tracks M1-M8: a note per step */
-#define TRACKS (DTRACKS + MTRACKS)
+#define MTRACKS 8                                   /* melodic tracks M1-M8 (tracks 16-23): a note per step */
+#define XTRACKS 8                                   /* v0.29: drum tracks T17-T24 = tracks 24-31 (after the melodic ones, so older saves keep their places) */
+#define TRACKS (DTRACKS + MTRACKS + XTRACKS)
+#define TRACKS_V28 24                               /* the per-track arrays of the settings record up to v0.28 */
 #define MAXSTEPS 128
 #define PATTERNS 32
 #define VIEW_ROWS 4
@@ -249,6 +253,7 @@ static inline uint32_t us_now(void) { return TIM2->CNT; }
 /* ---------- tracks, patterns, settings ---------- */
 
 static const uint8_t DEF_NOTE[DTRACKS] = {36, 38, 42, 46, 39, 37, 41, 45, 48, 49, 51, 56, 54, 70, 75, 63};
+static const uint8_t XDEF_NOTE[XTRACKS] = {60, 61, 62, 64, 65, 66, 67, 68};   /* T17-T24 (none of T1-T16's) */
 /* track colours, R,G,B brightness 0-7 (repeats every 8 tracks) */
 static const uint8_t TRACK_RGB[8][3] = {
     {7, 0, 0}, {6, 4, 0}, {0, 7, 0}, {0, 3, 7}, {6, 0, 6}, {0, 6, 6}, {6, 6, 0}, {4, 4, 7},
@@ -265,7 +270,7 @@ typedef struct {
     uint16_t mute_bits;                             /* T1-T16 */
     uint8_t note[DTRACKS];                          /* 0 = default */
     uint8_t chan[DTRACKS];                          /* 1-16, 0 = 10 */
-    uint8_t lock_cc[TRACKS];                        /* v0.11 (was reserved, always 0): the CC a track's step locks send, 0 = none */
+    uint8_t lock_cc[TRACKS_V28];                    /* v0.11 (was reserved, always 0): the CC a track's step locks send, 0 = none (T17-T24: x_lock_cc) */
     /* v0.7: song mode (appended: older saves load these as zero = song off, empty) */
     uint8_t song_on;                                /* 1 = playback follows the song */
     uint8_t song_pat[16];                           /* slot -> pattern 1-32, 0 = empty (the song ends there) */
@@ -276,7 +281,7 @@ typedef struct {
     /* v0.8: DRUM mode = four 4x4 pad grids side by side, each with its own channel and notes */
     uint8_t grid_chan[4];                           /* 1-16, 0 = default (10, 1, 2, 3) */
     uint8_t grid_base[4];                           /* chromatic layout: pad 1's note 1-112, 0 = 36 */
-    uint8_t grid_layout[4];                         /* 0 = chromatic from grid_base, 1 = classic MPC note map */
+    uint8_t grid_layout[4];                         /* 0 = chromatic from grid_base, 1 = the MPC's pads (CC), 2 = 16 levels (v0.29) */
     /* v0.9: melodic tracks */
     uint8_t m_chan[MTRACKS];                        /* 1-16, 0 = default (M1 = 1 ... M8 = 8) */
     uint8_t m_mute;                                 /* bit i = M(i+1) muted */
@@ -295,7 +300,9 @@ typedef struct {
     uint8_t lt_bars;                                /* VU bar look: 0 snappy, 1 smooth, 2 whole, 3 heat, 4 heat smooth (0 = what an older save reads) */
     uint8_t lt_flip;                                /* 1 = the heat looks are flipped: cool base, hot tip (0 = what an older save reads) */
     uint8_t lt_idle_v18;                            /* v0.18: 1 = Idle start was switched OFF once (the owner never wanted the screen saver) */
-    uint8_t reserved3[5];
+    uint8_t pad_hold;                               /* v0.28: index into PAD_HOLD_MS, how long a live pad must stay up before its release counts */
+    uint8_t pad_hold_v28;                           /* v0.28: 1 = pad_hold has been set up (an older save reads 0 -> the default) */
+    uint8_t reserved3[3];
     /* v0.14: 32 patterns, each with a colour (appended) */
     uint8_t pat_col[32];                            /* colour 0-15 + 1, 0 = default (pattern number mod 16) */
     /* v0.20 (appended: an older save reads zeros = exactly the old behaviour) */
@@ -306,11 +313,27 @@ typedef struct {
     uint8_t mark_off;                               /* 1 = no beat / bar marks on the step grid */
     uint8_t mark_col;                               /* index into MARK_RGB (0 = dim blue) */
     uint8_t mark_space;                             /* 0 = every beat, 1 = every bar, 2 = both (the bar one brighter) */
+    /* v0.23 (appended: an older save reads zeros = every track at full volume, exactly the old behaviour) */
+    uint8_t trk_lvl[TRACKS_V28];                    /* per-track volume (the STEP faders): 0 = full, else level 0-126 + 1 (ctl_trk_level) */
+    /* v0.29: tracks T17-T24 (tracks 24-31) + CC tracks (appended: an older save reads zeros = defaults, every track plays notes) */
+    uint8_t x_note[XTRACKS];                        /* T17-T24's note (a CC track: its CC number), 0 = default */
+    uint8_t x_chan[XTRACKS];                        /* 1-16, 0 = 10 */
+    uint8_t x_mute;                                 /* bit i = T(17+i) muted */
+    uint8_t x_lock_cc[XTRACKS];                     /* as lock_cc */
+    uint8_t x_trk_lvl[XTRACKS];                     /* as trk_lvl */
+    uint8_t cc_trk[4];                              /* bit t (any drum track 0-31) = the track sends a CC (its note = the CC number), not a note */
+    uint8_t reserved4[1];                           /* (keeps the size even: no padding byte that a struct copy could leave out) */
+    /* v0.29: the free-knob banks PER SECTION (appended): [0] NOTE mode, [1] DRUM mode, [2] the MPC remote; STEP mode keeps
+       knob_bank / kb_fn / kb_ch / kb_abs above. kbx_init 0 (an older save) = each starts as a copy of the STEP banks. */
+    uint8_t kbx_bank[3];
+    uint8_t kbx_fn[3][4][4], kbx_ch[3][4][4], kbx_abs[3][4][4];
+    uint8_t kbx_init;
 } global_t;
 
-_Static_assert(TRACKS == ST_TRACKS && DTRACKS == ST_MEL_FIRST && PATTERNS == ST_PATTERNS && MAXSTEPS == ST_MAXSTEPS, "steps.h sizes");
+_Static_assert(TRACKS == ST_TRACKS && DTRACKS == ST_MEL_FIRST && DTRACKS + MTRACKS == ST_MEL_END && TRACKS_V28 == ST_TRACKS_V2
+               && PATTERNS == ST_PATTERNS && MAXSTEPS == ST_MAXSTEPS, "steps.h sizes");
 _Static_assert(ST_REC_HDR + ST_POOL <= S2_MAX_RECORD, "a pattern must fit one save record");
-_Static_assert(sizeof(global_t) == 356, "global_t changed size: only APPEND fields (older saves zero-fill)");
+_Static_assert(sizeof(global_t) == 566, "global_t changed size: only APPEND fields (older saves zero-fill)");
 static global_t G;
 static global_t G_saved;                            /* what the newest global record holds (skip identical saves) */
 static global_t G_snap;                             /* the settings record being written: a copy, so edits never tear it */
@@ -323,17 +346,42 @@ static bool global_dirty;
 
 #define BPM     G.bpm
 #define CURPAT  G.cur_pat
-static inline bool is_mel(int t) { return t >= DTRACKS; }
+static inline bool is_mel(int t) { return t >= DTRACKS && t < DTRACKS + MTRACKS; }
+static inline bool is_x(int t) { return t >= DTRACKS + MTRACKS; }   /* T17-T24 */
+static inline int x_of(int t) { return t - DTRACKS - MTRACKS; }
+/* A drum track can be a CC track (v0.29): its steps send CC <its note> = the step's lock value, else the level's velocity. */
+static inline bool is_cc(int t) { return !is_mel(t) && (G.cc_trk[t >> 3] >> (t & 7) & 1); }
 static inline int tlen(int p, int t) { int l = steps_len[p][t]; return l ? l : 16; }
 static inline int level(int p, int t, int s) { return steps_get(p, t, s) & 3; }
-static inline uint8_t tnote(int t) { return G.note[t] ? G.note[t] : DEF_NOTE[t]; }   /* drum tracks only */
+static inline uint8_t tnote(int t)                  /* drum tracks only */
+{
+    if (is_x(t)) return G.x_note[x_of(t)] ? G.x_note[x_of(t)] : XDEF_NOTE[x_of(t)];
+    return G.note[t] ? G.note[t] : DEF_NOTE[t];
+}
+static inline void set_tnote(int t, uint8_t n) { if (is_x(t)) G.x_note[x_of(t)] = n; else G.note[t] = n; }
 static inline uint8_t tchan(int t)
 {
     if (is_mel(t)) { uint8_t c = G.m_chan[t - DTRACKS]; return (c >= 1 && c <= 16) ? c : (uint8_t)(t - DTRACKS + 1); }
-    return (G.chan[t] >= 1 && G.chan[t] <= 16) ? G.chan[t] : 10;
+    uint8_t c = is_x(t) ? G.x_chan[x_of(t)] : G.chan[t];
+    return (c >= 1 && c <= 16) ? c : 10;
 }
-static inline bool muted(int t) { return is_mel(t) ? (G.m_mute >> (t - DTRACKS) & 1) : (G.mute_bits >> t & 1); }
-static inline void toggle_mute(int t) { if (is_mel(t)) G.m_mute ^= (uint8_t)(1u << (t - DTRACKS)); else G.mute_bits ^= (uint16_t)(1u << t); }
+static inline void set_tchan(int t, uint8_t c) { if (is_mel(t)) G.m_chan[t - DTRACKS] = c; else if (is_x(t)) G.x_chan[x_of(t)] = c; else G.chan[t] = c; }
+static inline uint8_t *lock_cc_p(int t) { return is_x(t) ? &G.x_lock_cc[x_of(t)] : &G.lock_cc[t]; }
+static inline uint8_t *trk_lvl_p(int t) { return is_x(t) ? &G.x_trk_lvl[x_of(t)] : &G.trk_lvl[t]; }
+static inline bool muted(int t)
+{
+    if (is_mel(t)) return G.m_mute >> (t - DTRACKS) & 1;
+    if (is_x(t)) return G.x_mute >> x_of(t) & 1;
+    return G.mute_bits >> t & 1;
+}
+static inline void toggle_mute(int t)
+{
+    if (is_mel(t)) G.m_mute ^= (uint8_t)(1u << (t - DTRACKS));
+    else if (is_x(t)) G.x_mute ^= (uint8_t)(1u << x_of(t));
+    else G.mute_bits ^= (uint16_t)(1u << t);
+}
+/* The track on display row i (0-31): T1-T16, T17-T24, then M1-M8 (storage keeps M1-M8 at 16-23, where older saves have them). */
+static inline int vtrack(int i) { return i < DTRACKS ? i : i < DTRACKS + XTRACKS ? i + MTRACKS : i - XTRACKS; }
 /* the note a step plays: a melodic step's own note, a drum track's note */
 static inline uint8_t step_note(int p, int t, int s) { if (!is_mel(t)) return tnote(t); uint8_t n = steps_note(p, t, s); return n ? n : 60; }
 static inline int kb_track(void) { return DTRACKS + G.kb_track % MTRACKS; }   /* NOTE mode's melodic track */
@@ -347,10 +395,46 @@ static const uint8_t GRID_DEF_CHAN[4] = {10, 1, 2, 3};
 #define MPC_PANEL_CH 14
 static const uint8_t MPC_PAD_CC[16] = {20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 52, 53, 54, 55};
 static inline bool grid_mpc(int g) { return G.grid_layout[g] == 1; }
+/* v0.29: 16 LEVELS (like the MPC's): all 16 pads of the group play its note (pad 1's, 1B), pad 1 softest .. pad 16 = 127 */
+static inline bool grid_lvl(int g) { return G.grid_layout[g] == 2; }
+static inline uint8_t level16_vel(int p) { return (uint8_t)(((p + 1) * 127 + 8) / 16); }   /* pad 0-15 -> 8, 16 ... 127 */
 static inline uint8_t grid_chan(int g) { return grid_mpc(g) ? MPC_PANEL_CH : (G.grid_chan[g] >= 1 && G.grid_chan[g] <= 16) ? G.grid_chan[g] : GRID_DEF_CHAN[g]; }
 static inline int grid_base(int g) { return (G.grid_base[g] >= 1 && G.grid_base[g] <= 112) ? G.grid_base[g] : 36; }
 static inline int grid_padnum(int r, int c) { return (3 - r) * 4 + c % 4; }          /* 0-15 = pad 1-16 */
-static inline uint8_t grid_note(int g, int p) { return grid_mpc(g) ? MPC_PAD_CC[p] : (uint8_t)(grid_base(g) + p); }   /* MPC: the CC number */
+static inline uint8_t grid_note(int g, int p) { return grid_mpc(g) ? MPC_PAD_CC[p] : grid_lvl(g) ? (uint8_t)grid_base(g) : (uint8_t)(grid_base(g) + p); }   /* MPC: the CC number */
+
+/* v0.28: DRUM pressed again = the MPC REMOTE: the owner's whole MPC1000 / JJOS2XL face on the 64 pads (his layout,
+   2026-10-23; his panel map on channel 14, notes counted C3 = 60 like the MPC). Each pad IS that MPC button: press and
+   release, never recorded. The 16 pad CCs are the MPC's physical pads, so they do whatever the MPC's screen makes them
+   do (play the bank, pick a NEXT SEQ, 16 levels ...). Index = row * 16 + column, row 0 = the top. */
+enum { MR_NONE, MR_NOTE, MR_CC };
+/* Colours = the owner's, pad by pad (2026-10-23, picked in a mock-up): the fader colours (FAD_RGB order) + grey. */
+enum { K_RED, K_ORANGE, K_AMBER, K_YELLOW, K_LIME, K_GREEN, K_MINT, K_TEAL, K_CYAN, K_SKY, K_BLUE, K_INDIGO, K_PURPLE,
+       K_MAGENTA, K_PINK, K_WHITE, K_GREY };
+#define MRN(v, c) {MR_NOTE, v, c}
+#define MRC(v, c) {MR_CC, v, c}
+#define MRX {MR_NONE, 0, 0}
+static const struct { uint8_t type, val, col; } MPCREM[64] = {
+    /* pads 13-16 | TAP, ERASE, UNDO SEQ, NUMERIC | FULL LEVEL, BANK A | F1-F6 */
+    MRC(52, K_BLUE), MRC(53, K_BLUE), MRC(54, K_BLUE), MRC(55, K_BLUE),
+    MRN(55, K_GREY), MRN(56, K_WHITE), MRN(54, K_RED), MRN(61, K_MINT), MRN(57, K_ORANGE), MRC(17, K_AMBER),
+    MRN(38, K_INDIGO), MRN(39, K_PURPLE), MRN(40, K_INDIGO), MRN(41, K_PURPLE), MRN(42, K_INDIGO), MRN(43, K_PURPLE),
+    /* pads 9-12 | MODE, MAIN, WINDOW, AFTER 1 | 16 LEVELS, BANK B | -, STEP back, STEP forward, -, -, - */
+    MRC(28, K_BLUE), MRC(29, K_BLUE), MRC(30, K_BLUE), MRC(31, K_BLUE),
+    MRN(49, K_GREEN), MRN(52, K_GREY), MRN(53, K_YELLOW), MRN(48, K_INDIGO), MRN(58, K_ORANGE), MRC(18, K_AMBER),
+    MRX, MRN(65, K_WHITE), MRN(64, K_WHITE), MRX, MRX, MRX,
+    /* pads 5-8 | DATA -, UP, DATA +, AFTER 2 | NEXT SEQ, BANK C | -, LOCATE back, LOCATE forward, -, -, PLAY START */
+    MRC(24, K_BLUE), MRC(25, K_BLUE), MRC(26, K_BLUE), MRC(27, K_BLUE),
+    MRN(36, K_TEAL), MRN(44, K_WHITE), MRN(37, K_TEAL), MRN(51, K_INDIGO), MRN(59, K_ORANGE), MRC(19, K_AMBER),
+    MRX, MRN(63, K_YELLOW), MRN(62, K_YELLOW), MRX, MRX, MRC(16, K_WHITE),
+    /* pads 1-4 | LEFT, DOWN, RIGHT, SHIFT | TRACK MUTE, BANK D | -, -, REC, OVERDUB, STOP, PLAY */
+    MRC(20, K_BLUE), MRC(21, K_BLUE), MRC(22, K_BLUE), MRC(23, K_BLUE),
+    MRN(46, K_WHITE), MRN(45, K_WHITE), MRN(47, K_WHITE), MRN(50, K_SKY), MRN(60, K_ORANGE), MRC(9, K_AMBER),
+    MRX, MRX, MRC(12, K_RED), MRC(13, K_RED), MRC(14, K_GREY), MRC(15, K_WHITE),
+};
+#undef MRN
+#undef MRC
+#undef MRX
 
 /* Tracks are named by number only (T1-T16): what a note sounds like depends on where it's sent,
    so the firmware never guesses a drum name. Notes are shown as musical names (60 = C4). */
@@ -358,9 +442,10 @@ static const char *track_name(int t)
 {
     static char nbuf[6];
     if (is_mel(t)) { nbuf[0] = 'M'; nbuf[1] = (char)('1' + t - DTRACKS); nbuf[2] = 0; return nbuf; }
+    int n = is_x(t) ? DTRACKS + 1 + x_of(t) : t + 1;   /* T1-T16, T17-T24 */
     nbuf[0] = 'T';
-    if (t + 1 >= 10) { nbuf[1] = '1'; nbuf[2] = (char)('0' + (t + 1) % 10); nbuf[3] = 0; }
-    else { nbuf[1] = (char)('1' + t); nbuf[2] = 0; }
+    if (n >= 10) { nbuf[1] = (char)('0' + n / 10); nbuf[2] = (char)('0' + n % 10); nbuf[3] = 0; }
+    else { nbuf[1] = (char)('0' + n); nbuf[2] = 0; }
     return nbuf;
 }
 
@@ -403,6 +488,8 @@ static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
 static int queued_pat = -1;                         /* pattern (or, in song mode, slot) to switch to at the bar */
 #define SLOTS 16
 static bool song_edit;                              /* song editor on the pads */
+static bool trkvol;                                 /* v0.23: STEP pressed again = one volume fader per track (4 rows) instead of the steps */
+static bool mpcrem;                                 /* v0.28: DRUM pressed again = the MPC remote (MPCREM) instead of the four groups */
 static int song_sel;                                /* slot selected in the editor */
 static int song_slot, song_bar;                     /* playback position in the song */
 static int view_top;                                /* first visible track */
@@ -423,6 +510,8 @@ static bool hold_songed;
 static int held_t = -1, held_s = -1;               /* step pad being held (step settings) */
 static bool held_pad_turned, held_pad_was_lit;
 static bool held_row_turned;
+static uint8_t row_consumed;                        /* rows whose mute tap was counted when another row landed on them (ctl.h) */
+static int row_trk[4];                              /* the track each row button was on when it went down (VIEW_ROWS rows) */
 static uint32_t save_due;
 static bool save_waiting_compact;
 static int saving_kind = -1;                        /* record being written, -1 none */
@@ -497,6 +586,67 @@ static int rec_chord_t = -1; static uint32_t rec_chord_g;   /* NOTE-mode recordi
 static bool ext_odd_due;                            /* external clock: the swung (odd) step of this pair hasn't played */
 static uint32_t held_since[TRACKS];                 /* step a TIE / SLIDE hold began (a hold lasts at most one loop) */
 
+/* UNDO (v0.29): SHIFT + REC puts a pattern's steps + lengths back to before its last edit; again = redo. An edit is one
+   GESTURE: a step pad from press to release (with everything the knobs did to it), one tap, a pattern copy (the pattern
+   copied INTO), or a whole REC take (from the first recorded hit until REC is off or playing stops). The snapshot is
+   the pattern's own save record (steps.c), so it holds exactly what a save would. Settings (channels, notes, mutes,
+   tempo, CC tracks ...) are not undone. A gesture's snapshot goes into the spare buffer and only becomes the undo point
+   once the gesture really changes the pattern (holding a step to look at it keeps the undo there was). */
+#define UNDO_MAX 1536                               /* one pattern's record: 548 head + ~330 drum / ~160 melodic steps (RAM: 2 of these) */
+static uint8_t undo_buf[2][UNDO_MAX];
+static uint16_t undo_len[2];
+static int undo_cur;                                /* the buffer holding the state SHIFT + REC goes back to */
+static int undo_pat = -1;                           /* its pattern, -1 = nothing to undo */
+static bool undo_redo;                              /* that state is what an undo replaced: SHIFT + REC = redo */
+static bool undo_open, undo_used;                   /* a gesture is under way / it has changed its pattern */
+static int undo_gpat;                               /* the gesture's pattern */
+static bool undo_gok;                               /* its snapshot fitted the spare buffer */
+static bool undo_rec;                               /* the gesture is a REC take (record_step opened it): it lasts while REC records */
+static bool undo_big;                               /* the last edit had no undo: its pattern was too big for the buffer */
+/* pattern p's record into buffer b */
+static bool undo_take(int p, int b)
+{
+    uint32_t n = steps_record_len(p);
+    if (n > UNDO_MAX) { undo_len[b] = 0; return false; }
+    steps_record_copy(p, undo_buf[b]);              /* (a bulk copy: a press must not stall the step clock) */
+    undo_len[b] = (uint16_t)n;
+    return true;
+}
+/* before a gesture's first change to pattern p */
+static void undo_begin(int p, bool rec)
+{
+    if (undo_open && undo_gpat == p) { if (rec) undo_rec = true; return; }
+    undo_open = true; undo_used = false; undo_gpat = p; undo_rec = rec;
+    undo_gok = undo_take(p, undo_cur ^ 1);
+}
+/* the pattern really changed (edited_pattern / touched_pattern) */
+static void undo_edited(int p)
+{
+    if (!undo_open || undo_used || p != undo_gpat) return;
+    undo_used = true; undo_redo = false;
+    undo_big = !undo_gok;
+    if (undo_gok) { undo_cur ^= 1; undo_pat = p; }
+    else undo_pat = -1;                             /* too big to keep: this edit has no undo (the screen says so on SHIFT + REC) */
+}
+
+/* ROLLER / LOOPER (v0.29, like the BeatStep Pro's): hold KNOB MODE and the pads become the roller. In every row the left 8
+   pads roll ALL tracks, the right 8 only that row's track; left to right 1 bar, 1/2, 1/4, 1/8, 1/16 (a loop of that many
+   steps from where it started), then 1/32, 1/48, 1/64 (the step repeated 2 / 3 / 4 times). It lasts while the pad is held
+   (KNOB MODE may be let go); on release the track plays from where it would have been (ctl_roll_g: the step counter never
+   stopped). Several pads at once: a track's own pad beats the all-tracks ones, the newest wins. */
+static ctl_roll_pad_t roll_pad[64];                 /* what each held roller pad does (code -1 = not a roller pad) */
+static uint64_t roll_pads;                          /* roller pads held */
+static uint32_t roll_seq;
+static int8_t roll_c1[TRACKS];                      /* each track's roll now: code + 1, 0 = none (zero at boot) */
+static uint32_t roll_at[TRACKS];                    /* where its roll started (a step number, like gstep) */
+static bool roll_key;                               /* KNOB MODE is down as the roller key (not flipping a held step's page) */
+static bool roll_key_used;                          /* ... and a roller pad was pressed: its release does not step the knob bank */
+static uint32_t roll_key_ms;                        /* when it went down: the roller shows on the pads after 150 ms (a tap is a bank step) */
+static inline uint32_t roll_g(int t, uint32_t g) { return ctl_roll_g(g, roll_at[t], roll_c1[t] - 1); }   /* the step track t plays for step g */
+static bool roll_shown(void);                       /* (below, with the pad handling) */
+static int kctx(void);                              /* (below, with the knob banks) */
+static uint8_t *kc_bank(int c);
+
 /* A save reads the live data, so an edit to the record being written cancels it (it never counts);
    the save runs again 3 s after the last edit. */
 static void save_soon(void) { save_due = ms_ticks + 3000; if (!save_due) save_due = 1; }
@@ -510,7 +660,7 @@ static void cancel_save_of(int kind)
     if (save_forced_run) save_force = true;         /* a SAVE NOW that was cut short still saves with AUTOSAVE off */
     if (!save_due) save_soon();
 }
-static void edited_pattern(int p) { cancel_save_of(KIND_PAT(p)); pat_dirty |= (uint32_t)(1u << p); save_soon(); }
+static void edited_pattern(int p) { undo_edited(p); cancel_save_of(KIND_PAT(p)); pat_dirty |= (uint32_t)(1u << p); save_soon(); }
 static void edited_global(void) { global_dirty = true; save_soon(); }
 /* Moving around (pattern choice, mutes, octave, song on/off ...) and live-play gestures (tempo, swing,
    clock out, recorded hits): remembered with the next save, but doesn't start one by itself while
@@ -519,10 +669,29 @@ static void edited_global(void) { global_dirty = true; save_soon(); }
    CTL_LAZY_SAVE_MS after the LAST such change. */
 static void touched_lazy(void) { if (!playing && !ext_playing) save_lazy_due = ctl_lazy_arm(ms_ticks); }
 static void touched_global(void) { global_dirty = true; touched_lazy(); }
+static inline int trk_level(int t) { return ctl_trk_level(*trk_lvl_p(t)); }
+static ctl_tap_t tap_state;
+/* ALT + STEP (v0.24): tap the beat; 2 taps set the tempo, more refine it (ctl_tap). */
+static void tap_tempo(void)
+{
+    if (ext_clock) return;                          /* an external clock owns the tempo */
+    int b = ctl_tap(&tap_state, ms_ticks);
+    if (b) { BPM = (uint16_t)b; touched_global(); pop_kind = 1; pop_ms = ms_ticks; }   /* the big tempo number, like SHIFT + SELECT */
+    dirty = true;
+}
+static void trk_level_set(int t, int lv)            /* a new track volume (v0.23): saved with the next save, the screen repaints */
+{
+    lv = lv < 0 ? 0 : lv > 127 ? 127 : lv;
+    if (trk_level(t) == lv) return;
+    *trk_lvl_p(t) = ctl_trk_store(lv);
+    touched_global();
+    dirty = true;
+}
 /* Same for a pattern: a save of it that is mid-write reads live data, so it is cancelled (it never
    counts); the pattern then waits for the next save instead of re-arming the timer. */
 static void touched_pattern(int p)
 {
+    undo_edited(p);
     if (store2_busy_kind() == KIND_PAT(p)) { store2_cancel(); saving_kind = -1; save_run = false; }
     pat_dirty |= (uint32_t)(1u << p);
     touched_lazy();
@@ -534,6 +703,7 @@ static void commit_pending(void)
     if ((global_dirty || (pat_dirty & ~pat_stuck)) && !save_due && !save_run) save_soon();
 }
 static void pool_full(void) { memcpy(status_line, "full", 5); dirty = true; }   /* the step pool is out of room */
+
 
 /* Pattern colours: the fader palette; an empty pattern shows uncoloured (dim grey). */
 static int pat_col_idx(int p) { return G.pat_col[p] ? (G.pat_col[p] - 1) & 15 : p % 16; }
@@ -571,7 +741,15 @@ static void midi_send3(uint8_t a, uint8_t b, uint8_t c)
     uint8_t m[3] = {a, b, c};
     tud_midi_stream_write(0, m, 3);
 }
-static void midi_send1(uint8_t a) { if (tud_midi_mounted()) tud_midi_stream_write(0, &a, 1); }
+/* A real-time byte (clock F8, start FA, continue FB, stop FC) as its own USB-MIDI packet, CIN 0xF
+   (single byte). TinyUSB's stream_write packs it as CIN 0x5 (SysEx end / system common): Windows
+   decodes that, but the Kenton USB MIDI host dropped every one (2026-10-23, measured on the DIN). */
+static void midi_send1(uint8_t a)
+{
+    if (!tud_midi_mounted()) return;
+    const uint8_t pkt[4] = {0x0F, a, 0, 0};
+    tud_midi_packet_write(pkt);
+}
 /* v0.21: a surface pad press (vel 1-127) / release (0), as SysEx */
 static void surf_send(int pad, uint8_t vel)
 {
@@ -613,7 +791,7 @@ static void song_bar_end(void)
 
 /* A step's notes are collected and handed to USB in ONE write, so they leave in one packet.
    (One write per note let the first go out alone and the rest a USB frame later, 2-3 ms.) */
-static uint8_t batch[768];                          /* up to 256 messages: 24 tracks x (lock + 3 notes + ends) */
+static uint8_t batch[1024];                         /* up to 341 messages: 32 tracks x (lock + 3 notes + their offs + ends) = 30 bytes each */
 static uint32_t batch_n;
 static void batch_add(uint8_t a, uint8_t b, uint8_t c) { if (batch_n + 3 <= sizeof batch) { batch[batch_n++] = a; batch[batch_n++] = b; batch[batch_n++] = c; } }
 static void batch_flush(void) { if (batch_n && tud_midi_mounted()) tud_midi_stream_write(0, batch, batch_n); batch_n = 0; }
@@ -642,25 +820,34 @@ static void play_step(uint32_t g, uint32_t now)
         if (muted(t)) { if (held_notes[t].n) play_release(&held_notes[t], &OUT); continue; }
         if (held_notes[t].n && g - held_since[t] > (uint32_t)tlen(CURPAT, t))
             play_release(&held_notes[t], &OUT);     /* a hold that found no next note within a loop ends */
+        uint32_t gp = roll_g(t, g);                 /* the roller: the step this track plays instead (= g when it isn't rolling) */
         step_t v;
-        if (!steps_read(CURPAT, t, track_pos(t, g), &v)) continue;
+        if (!steps_read(CURPAT, t, track_pos(t, gp), &v)) continue;
         int lv = v.b & 3;
         if (rec_skip[t] == (int32_t)g + 1) { rec_skip[t] = 0; continue; }   /* hit live a moment ago */
-        if (!cond_ok(cond_of(v.cond), g / (uint32_t)tlen(CURPAT, t), fire_held(IN_PERFORM))) continue;   /* condition said no */
+        if (!cond_ok(cond_of(v.cond), gp / (uint32_t)tlen(CURPAT, t), fire_held(IN_PERFORM))) continue;   /* condition said no */
         if (step_prob(v.b) && rnd() % 100 >= PROB_PCT[step_prob(v.b)]) continue;   /* chance said no */
         uint8_t ch = (uint8_t)(tchan(t) - 1), notes[3];
-        int nn = play_step_notes(&v, is_mel(t), is_mel(t) ? 0 : tnote(t), ch, G.lock_cc[t], LEVEL_VEL[lv], &held_notes[t], &OUT, notes);
+        if (is_cc(t)) {                             /* a CC track: CC <its note> = the step's lock value, else the level's velocity */
+            out_cc(ch, tnote(t), v.lock ? (uint8_t)(v.lock - 1) : LEVEL_VEL[lv]);
+            flash_ms[t] = ms_ticks ? ms_ticks : 1;
+            lights_hit(t, lv);
+            continue;
+        }
+        uint8_t tvel = (uint8_t)ctl_trk_vel(LEVEL_VEL[lv], trk_level(t));   /* the track's volume fader scales its velocity */
+        int nn = play_step_notes(&v, is_mel(t), is_mel(t) ? 0 : tnote(t), ch, *lock_cc_p(t), tvel, &held_notes[t], &OUT, notes);
         flash_ms[t] = ms_ticks ? ms_ticks : 1;
         lights_hit(t, lv);                          /* the TRACKS light show jumps with the hit */
         if (!nn) { held_since[t] = g; continue; }   /* TIE / SLIDE: held until this track's next note */
-        int nr = step_ratchet(v.b);
+        int nr = ctl_roll_hits(roll_c1[t] - 1);     /* a 1/32 - 1/64 roll: that many hits per step, else the step's ratchet */
+        if (!nr) nr = step_ratchet(v.b);
         uint32_t sub = span / (uint32_t)nr, gate = sub * (uint32_t)step_gate(v.b) / 100;
         for (int i = 0; i < nn; i++) {
             add_off(notes[i], ch, now + gate);
             for (int k = 1; k < nr; k++)            /* ratchets: the remaining hits, evenly spaced in the step */
                 for (int q = 0; q < NRATQ; q++)
                     if (!ratq[q].live) {
-                        ratq[q].note = notes[i]; ratq[q].chan = ch; ratq[q].vel = LEVEL_VEL[lv];
+                        ratq[q].note = notes[i]; ratq[q].chan = ch; ratq[q].vel = tvel;
                         ratq[q].at_us = now + (uint32_t)k * sub; ratq[q].gate_us = gate; ratq[q].live = true;
                         break;
                     }
@@ -689,7 +876,7 @@ static void stop(bool rewind)
     all_notes_off();
     pending = -1;
     rec_chord_t = -1;
-    if (rewind) { gstep = 0; has_played = false; }
+    if (rewind) { gstep = 0; has_played = false; memset(roll_at, 0, sizeof roll_at); }   /* (a held roll restarts from the top too) */
     commit_pending();                               /* live-play changes waiting */
     dirty = true;
 }
@@ -762,16 +949,33 @@ static void paint_drums(void)
             int g = c / 4, p = grid_padnum(r, c), R, Gn, B;
             uint8_t note = grid_note(g, p), ch = grid_chan(g);
             const uint8_t *rgb = GRID_RGB[g];
-            int k = p == 0 ? 3 : 2;
+            int k = grid_lvl(g) ? 1 + p * 4 / 15 : p == 0 ? 3 : 2;   /* 16 levels: dim (soft) .. bright (hard) */
             if (editing && g != grid_sel) k = 1;     /* ALT held: the grid being edited stands out */
-            for (int t = 0; t < DTRACKS; t++)       /* the sequencer just played this pad's note */
-                if (!grid_mpc(g) && flash_ms[t] && ms_ticks - flash_ms[t] < 90 && tnote(t) == note && tchan(t) == ch) { k = 7; break; }
+            for (int t = 0; t < TRACKS; t++)        /* the sequencer just played this pad's note (drum tracks, not CC ones) */
+                if (!is_mel(t) && !is_cc(t) && !grid_mpc(g) && flash_ms[t] && ms_ticks - flash_ms[t] < 90 && tnote(t) == note && tchan(t) == ch) { k = 7; break; }
             R = (rgb[0] * k + 6) / 7; Gn = (rgb[1] * k + 6) / 7; B = (rgb[2] * k + 6) / 7;
             if (live[r * 16 + c].on) R = Gn = B = 7;
             led_set(led_pad(r, c, 0), R);
             led_set(led_pad(r, c, 1), Gn);
             led_set(led_pad(r, c, 2), B);
         }
+    for (int r = 0; r < VIEW_ROWS; r++) { led_set(LED_ROW_G[r], 0); led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0); }
+}
+
+/* the MPC remote: each button in its own colour, white while held, unused pads dark */
+static const uint8_t MR_GREY[3] = {3, 3, 3};
+static void paint_mpcrem(void)
+{
+    for (int pad = 0; pad < 64; pad++) {
+        int r = pad / 16, c = pad % 16, R = 0, Gn = 0, B = 0;
+        if (MPCREM[pad].type != MR_NONE) {
+            int k = MPCREM[pad].col;
+            const uint8_t *rgb = k < 16 ? FAD_RGB[k] : MR_GREY;
+            R = (rgb[0] * 4 + 6) / 7; Gn = (rgb[1] * 4 + 6) / 7; B = (rgb[2] * 4 + 6) / 7;
+            if (live[pad].on) R = Gn = B = 7;
+        }
+        led_set(led_pad(r, c, 0), R); led_set(led_pad(r, c, 1), Gn); led_set(led_pad(r, c, 2), B);
+    }
     for (int r = 0; r < VIEW_ROWS; r++) { led_set(LED_ROW_G[r], 0); led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0); }
 }
 
@@ -805,9 +1009,9 @@ static void paint_faders(void)
             int R = 0, Gn = 0, B = 0;
             if (f < G.fad_n) {
                 const uint8_t *rgb = FAD_RGB[G.fad_col[f] & 15];
-                int lit = (G.fad_val[f] * PAGE + 63) / 127;
-                if (c < lit) { R = rgb[0]; Gn = rgb[1]; B = rgb[2]; }
-                else { R = rgb[0] ? 1 : 0; Gn = rgb[1] ? 1 : 0; B = rgb[2] ? 1 : 0; }
+                int pst = ctl_fader_pad(c, G.fad_val[f]);       /* bright up to the level's tip pad, the tip dim, dark above */
+                if (pst == 2) { R = rgb[0]; Gn = rgb[1]; B = rgb[2]; }
+                else if (pst == 1) { R = rgb[0] ? 1 : 0; Gn = rgb[1] ? 1 : 0; B = rgb[2] ? 1 : 0; }
             } else if (f == G.fad_n && c == 0) R = Gn = B = 1;   /* "+": add a fader here */
             led_set(led_pad(r, c, 0), R);
             led_set(led_pad(r, c, 1), Gn);
@@ -815,6 +1019,55 @@ static void paint_faders(void)
         }
         led_set(LED_ROW_G[r], held_row == r ? 7 : (f < G.fad_n ? 3 : f == G.fad_n ? 1 : 0));
         led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0);
+    }
+}
+
+/* STEP pressed again (v0.23): one volume fader per track, 4 rows at a time. Each row is lit up to the track's level in the
+   track's own colour; the row buttons still mute (same lights as the step view). */
+static void paint_trkvol(void)
+{
+    for (int r = 0; r < VIEW_ROWS; r++) {
+        int t = vtrack(view_top + r);
+        const uint8_t *rgb = TRACK_RGB[t % 8];
+        int tl = trk_level(t);
+        for (int c = 0; c < PAGE; c++) {
+            int R, Gn, B, pst = ctl_fader_pad(c, tl);       /* bright up to the level's tip pad, the tip dim, dark above */
+            if (pst == 2) { R = rgb[0]; Gn = rgb[1]; B = rgb[2]; }
+            else if (pst == 1) { R = rgb[0] ? 1 : 0; Gn = rgb[1] ? 1 : 0; B = rgb[2] ? 1 : 0; }
+            else { R = Gn = B = 0; }
+            if (muted(t)) { R = R ? 1 : 0; Gn = Gn ? 1 : 0; B = B ? 1 : 0; }
+            led_set(led_pad(r, c, 0), R);
+            led_set(led_pad(r, c, 1), Gn);
+            led_set(led_pad(r, c, 2), B);
+        }
+        led_set(LED_ROW_G[r], held_row == r ? 7 : (muted(t) ? 0 : 3));
+        led_set(LED_ROWSIDE_R[r], muted(t) ? 7 : 0);
+        led_set(LED_ROWSIDE_G[r], 0);
+    }
+}
+
+/* The roller (KNOB MODE held): in each row the left 8 pads = all tracks (loops amber, rolls cyan), the right 8 = that row's
+   track in its colour (rolls brighter); a held pad white. */
+static void paint_roller(void)
+{
+    for (int r = 0; r < VIEW_ROWS; r++) {
+        int t = vtrack(view_top + r);
+        for (int c = 0; c < PAGE; c++) {
+            int pad = r * 16 + c, code = c % 8, R, Gn, B;
+            if (roll_pads >> pad & 1) R = Gn = B = 7;
+            else if (c < 8) { if (code < 5) { R = 5; Gn = 2; B = 0; } else { R = 0; Gn = 3; B = 5; } }
+            else {
+                const uint8_t *rgb = TRACK_RGB[t % 8];
+                int k = code < 5 ? 2 : 5;
+                R = (rgb[0] * k + 6) / 7; Gn = (rgb[1] * k + 6) / 7; B = (rgb[2] * k + 6) / 7;
+            }
+            led_set(led_pad(r, c, 0), R);
+            led_set(led_pad(r, c, 1), Gn);
+            led_set(led_pad(r, c, 2), B);
+        }
+        led_set(LED_ROW_G[r], muted(t) ? 0 : 3);
+        led_set(LED_ROWSIDE_R[r], muted(t) ? 7 : 0);
+        led_set(LED_ROWSIDE_G[r], roll_c1[t] ? 7 : 0);      /* this row's track is rolling */
     }
 }
 
@@ -844,14 +1097,18 @@ static void __attribute__((noinline)) paint(void)
     bool run = playing || ext_playing;
     if (surface_on) paint_surface();
     else if (picker_on()) paint_picker();
+    else if (roll_shown()) paint_roller();
     else if (mode == MODE_FADER) paint_faders();
     else if (mode == MODE_NOTE) paint_keys();
+    else if (mode == MODE_DRUM && mpcrem) paint_mpcrem();
     else if (mode == MODE_DRUM) paint_drums();
-    else if (song_edit) paint_song_editor(); else {
+    else if (song_edit) paint_song_editor();
+    else if (trkvol) paint_trkvol();
+    else {
     uint32_t last = gstep ? gstep - 1 : 0;          /* the step that most recently played */
     for (int r = 0; r < VIEW_ROWS; r++) {
-        int t = view_top + r;
-        int len = tlen(CURPAT, t), head = track_pos(t, last);
+        int t = vtrack(view_top + r);
+        int len = tlen(CURPAT, t), head = track_pos(t, roll_g(t, last));   /* (a rolling track: its loop position) */
         const uint8_t *rgb = TRACK_RGB[t % 8];
         for (int c = 0; c < PAGE; c++) {
             int s = page * PAGE + c, R = 0, Gn = 0, B = 0;
@@ -893,15 +1150,15 @@ static void __attribute__((noinline)) paint(void)
     led_set(LED_STOP_Y, run ? 2 : 0);
     led_set(LED_SHIFT_Y, fire_held(IN_SHIFT) ? 7 : 1);
     led_set(LED_ALT_Y, fire_held(IN_ALT) ? 7 : 1);
-    led_set(LED_STEP_Y, mode == MODE_STEP ? 7 : 1);
+    led_set(LED_STEP_Y, mode == MODE_STEP ? (trkvol && ((ms_ticks / 300) & 1) ? 2 : 7) : 1);   /* blinks while the track faders are up */
     led_set(LED_NOTE_Y, mode == MODE_NOTE ? 7 : 1);
-    led_set(LED_DRUM_Y, mode == MODE_DRUM ? 7 : 1);
+    led_set(LED_DRUM_Y, mode == MODE_DRUM ? (mpcrem && ((ms_ticks / 300) & 1) ? 2 : 7) : 1);   /* blinks while the MPC remote is up */
     led_set(LED_REC_Y, rec_arm ? 7 : 0);
     if (held_t >= 0 && held_row < 0) {             /* a step held: which page its knobs are on (CHANNEL = 1, MIXER = 2) */
         led_set(LED_CHANNEL, knob_page == 0 ? 5 : 1); led_set(LED_MIXER, knob_page == 1 ? 5 : 1);
         led_set(LED_USER1, 0); led_set(LED_USER2, 0);
     } else {                                        /* otherwise: the free-knob bank, 1-4 */
-        int kb = G.knob_bank & 3;
+        int kb = *kc_bank(kctx()) & 3;
         led_set(LED_CHANNEL, kb == 0 ? 5 : 1); led_set(LED_MIXER, kb == 1 ? 5 : 1);
         led_set(LED_USER1, kb == 2 ? 5 : 1); led_set(LED_USER2, kb == 3 ? 5 : 1);
     }
@@ -1038,15 +1295,33 @@ static void lights_task(uint32_t now, bool quiet)
    of the box = the old behaviour (knob 1 swing, knobs 2-4 relative CC 17 / 18 / 19 on ch 1); banks 2-4 = CC 20-31. */
 #define KB_SWING 128
 #define KB_TEMPO 129
-static uint8_t kb_val[4][4] = {{64, 64, 64, 64}, {64, 64, 64, 64}, {64, 64, 64, 64}, {64, 64, 64, 64}};   /* absolute knobs' values */
-static int kb_fn(int b, int k)
+/* v0.29: each SECTION has its own 4 banks: STEP, NOTE, DRUM, the MPC remote (kctx: the one the pads are in now). */
+enum { KC_STEP, KC_NOTE, KC_DRUM, KC_MPC, KC_N };
+static const char *const NM_KCTX[KC_N] = {"step", "note", "drum", "MPC"};
+static int kctx(void) { return mode == MODE_NOTE ? KC_NOTE : mode == MODE_DRUM ? (mpcrem ? KC_MPC : KC_DRUM) : KC_STEP; }
+static uint8_t *kc_bank(int c) { return c > 0 && c < KC_N ? &G.kbx_bank[c - 1] : &G.knob_bank; }
+static uint8_t *kc_fn(int c, int b, int k) { return c > 0 && c < KC_N ? &G.kbx_fn[c - 1][b & 3][k & 3] : &G.kb_fn[b & 3][k & 3]; }
+static uint8_t *kc_ch(int c, int b, int k) { return c > 0 && c < KC_N ? &G.kbx_ch[c - 1][b & 3][k & 3] : &G.kb_ch[b & 3][k & 3]; }
+static uint8_t *kc_abs(int c, int b, int k) { return c > 0 && c < KC_N ? &G.kbx_abs[c - 1][b & 3][k & 3] : &G.kb_abs[b & 3][k & 3]; }
+static uint8_t kb_val[KC_N][4][4];                  /* absolute knobs' values (64 at boot: main) */
+static int kb_fn(int c, int b, int k)
 {
-    int f = G.kb_fn[b & 3][k & 3];
+    int f = *kc_fn(c, b, k);
     if (f >= 1 && f <= KB_TEMPO) return f;
-    if (b == 0) return k == 0 ? KB_SWING : 16 + k;
-    return 16 + 4 * b + k;
+    if ((b & 3) == 0) return (k & 3) == 0 ? KB_SWING : 16 + (k & 3);
+    return 16 + 4 * (b & 3) + (k & 3);
 }
-static int kb_chan(int b, int k) { int c = G.kb_ch[b & 3][k & 3]; return c >= 1 && c <= 16 ? c : 1; }
+static int kb_chan(int c, int b, int k) { int ch = *kc_ch(c, b, k); return ch >= 1 && ch <= 16 ? ch : 1; }
+/* v0.29, once: NOTE / DRUM / MPC start as copies of the STEP banks (so nothing changes until one is edited) */
+static void kc_init_copies(void)
+{
+    if (G.kbx_init) return;
+    for (int c = 0; c < KC_N - 1; c++) {
+        G.kbx_bank[c] = G.knob_bank;
+        memcpy(G.kbx_fn[c], G.kb_fn, sizeof G.kb_fn); memcpy(G.kbx_ch[c], G.kb_ch, sizeof G.kb_ch); memcpy(G.kbx_abs[c], G.kb_abs, sizeof G.kb_abs);
+    }
+    G.kbx_init = 1;
+}
 
 /* MIDI clock out on / off: SHIFT + PLAY and BROWSER > Playing (a running clock gets a STOP / CONTINUE so gear follows) */
 static void clock_out_toggle(void)
@@ -1061,7 +1336,8 @@ static void clock_out_toggle(void)
 enum { MK_ENUM, MK_EFFECT, MK_SPEED, MK_ACT, MK_SUB,
        MK_INFO,                                     /* a read-only line (the shortcut pages): the name is the whole text */
        MK_TEMPO, MK_SWING, MK_CLOCK,                /* Playing: the same values SHIFT + SELECT, knob 1, SHIFT + PLAY change */
-       MK_KBANK, MK_KSEL, MK_KFN, MK_KCH, MK_KMODE };   /* Knobs: the bank, which knob, what it sends, channel, mode */
+       MK_KSEC, MK_KBANK, MK_KSEL, MK_KFN, MK_KCH, MK_KMODE,     /* Knobs: the section, the bank, which knob, what it sends, channel, mode */
+       MK_ROOM };                                       /* Memory (v0.26): read-only, n = 0 drum steps left, 1 note steps left, 2 % used */
 /* grp = the menu page the item is on (0 = the top); a MK_SUB item opens page n. */
 typedef struct { const char *name; uint8_t grp, kind; uint8_t *v; uint8_t n; const char *const *names; void (*act)(void); } mitem_t;
 
@@ -1069,6 +1345,7 @@ static void menu_save_now(void);
 static void menu_lights_now(void);
 static void menu_surface_now(void);
 static int menu_knob;                               /* Knobs page: the knob being set up (0-3) */
+static int menu_kc;                                 /* Knobs page: the section being set up (the one the pads were in when the menu opened) */
 static const char *const NM_AUTOSAVE[2] = {"on", "off"};   /* autosave_off = 0 means ON */
 static const char *const NM_OFFON[2] = {"off", "on"};
 static const char *const NM_BARS[5] = {"snappy", "smooth", "whole", "heat", "heat smooth"};
@@ -1076,6 +1353,7 @@ static const char *const NM_IDLE[6] = {"off", "15s", "30s", "1m", "2m", "5m"};
 static const char *const NM_MARKS[2] = {"on", "off"};   /* mark_off 0 = marks on */
 static const char *const NM_SPACING[3] = {"every beat", "every bar", "beat+bar"};
 static const char *const NM_KMODE[2] = {"relative", "absolute"};
+static const char *const NM_PADHOLD[6] = {"off", "10 ms", "20 ms", "30 ms", "40 ms", "60 ms"};   /* = PAD_HOLD_MS */
 static const mitem_t MENU[] = {
     /* the top page */
     {"Autosave",    0, MK_ENUM,   &G.autosave_off, 2, NM_AUTOSAVE, 0},
@@ -1085,6 +1363,7 @@ static const mitem_t MENU[] = {
     {"Knobs",       0, MK_SUB,    0, 3, 0, 0},
     {"Display",     0, MK_SUB,    0, 4, 0, 0},
     {"Lights",      0, MK_SUB,    0, 1, 0, 0},
+    {"Memory",      0, MK_SUB,    0, 16, 0, 0},
     {"Shortcuts",   0, MK_SUB,    0, 5, 0, 0},
     /* page 1: lights */
     {"Start lights", 1, MK_ACT,   0, 0, 0, menu_lights_now},
@@ -1097,7 +1376,9 @@ static const mitem_t MENU[] = {
     {"Tempo",       2, MK_TEMPO,  0, 0, 0, 0},
     {"Swing",       2, MK_SWING,  0, 0, 0, 0},
     {"Clock out",   2, MK_CLOCK,  0, 0, 0, 0},
+    {"Pad release", 2, MK_ENUM,   &G.pad_hold, 6, NM_PADHOLD, 0},
     /* page 3: knobs (the free knobs, nothing held; KNOB MODE steps the bank) */
+    {"Section",     3, MK_KSEC,   0, 0, 0, 0},
     {"Bank",        3, MK_KBANK,  0, 0, 0, 0},
     {"Knob",        3, MK_KSEL,   0, 0, 0, 0},
     {"Sends",       3, MK_KFN,    0, 0, 0, 0},
@@ -1130,34 +1411,42 @@ static const mitem_t MENU[] = {
     {"2C: chord", 7, MK_INFO, 0, 0, 0, 0},
     {"1A: track channel", 8, MK_INFO, 0, 0, 0, 0}, {"1B: track note", 8, MK_INFO, 0, 0, 0, 0},
     {"1C: lock CC", 8, MK_INFO, 0, 0, 0, 0}, {"M row 1B: new note", 8, MK_INFO, 0, 0, 0, 0},
+    {"1D: note / CC track", 8, MK_INFO, 0, 0, 0, 0},
     {"PAT: next/previous", 9, MK_INFO, 0, 0, 0, 0}, {"Hold PAT: picker", 9, MK_INFO, 0, 0, 0, 0},
     {"PAT+1A: color", 9, MK_INFO, 0, 0, 0, 0}, {"ALT+PAT: copy", 9, MK_INFO, 0, 0, 0, 0},
-    {"PAT/SONG: song mode", 9, MK_INFO, 0, 0, 0, 0}, {"SH+PAT/SONG: editor", 9, MK_INFO, 0, 0, 0, 0},
+    {"PAT/SONG: editor", 9, MK_INFO, 0, 0, 0, 0}, {"SH+PAT/SONG: on/off", 9, MK_INFO, 0, 0, 0, 0},
     {"Top row: slot", 10, MK_INFO, 0, 0, 0, 0}, {"Rows 2-3: pattern", 10, MK_INFO, 0, 0, 0, 0},
     {"Bottom row: bars", 10, MK_INFO, 0, 0, 0, 0}, {"1A: slot color", 10, MK_INFO, 0, 0, 0, 0},
     {"SH+slot: clear", 10, MK_INFO, 0, 0, 0, 0},
     {"PLAY: start/stop", 11, MK_INFO, 0, 0, 0, 0}, {"STOP: stop, rewind", 11, MK_INFO, 0, 0, 0, 0},
     {"SH+SELECT: tempo", 11, MK_INFO, 0, 0, 0, 0}, {"SH+ALT+SELECT: x10", 11, MK_INFO, 0, 0, 0, 0},
-    {"SH+PLAY: clock out", 11, MK_INFO, 0, 0, 0, 0}, {"REC: record live", 11, MK_INFO, 0, 0, 0, 0},
+    {"SH+PLAY: clock out", 11, MK_INFO, 0, 0, 0, 0}, {"ALT+STEP: tap tempo", 11, MK_INFO, 0, 0, 0, 0}, {"REC: record live", 11, MK_INFO, 0, 0, 0, 0},
+    {"STEP again: levels", 11, MK_INFO, 0, 0, 0, 0}, {"  tap/1A-1D: volume", 11, MK_INFO, 0, 0, 0, 0},
+    {"SH+REC: undo/redo", 11, MK_INFO, 0, 0, 0, 0}, {"KNOB MODE+pad: roll", 11, MK_INFO, 0, 0, 0, 0},
+    {"  left 8: all trks", 11, MK_INFO, 0, 0, 0, 0}, {"  right 8: that row", 11, MK_INFO, 0, 0, 0, 0},
     {"GRID: octave", 12, MK_INFO, 0, 0, 0, 0}, {"SH+GRID: semitone", 12, MK_INFO, 0, 0, 0, 0},
     {"SELECT: track M1-8", 12, MK_INFO, 0, 0, 0, 0}, {"ALT+SELECT: channel", 12, MK_INFO, 0, 0, 0, 0},
     {"SH+pad: accent", 12, MK_INFO, 0, 0, 0, 0}, {"REC: record notes", 12, MK_INFO, 0, 0, 0, 0},
     {"ALT+tap: pick group", 13, MK_INFO, 0, 0, 0, 0}, {"ALT+1A: channel", 13, MK_INFO, 0, 0, 0, 0},
-    {"ALT+1B: first note", 13, MK_INFO, 0, 0, 0, 0}, {"ALT+1C: MPC pads", 13, MK_INFO, 0, 0, 0, 0},
+    {"ALT+1B: first note", 13, MK_INFO, 0, 0, 0, 0}, {"ALT+1C: map/16 lv", 13, MK_INFO, 0, 0, 0, 0},
     {"SH+pad: accent", 13, MK_INFO, 0, 0, 0, 0}, {"REC: record hits", 13, MK_INFO, 0, 0, 0, 0},
+    {"DRUM again: MPC", 13, MK_INFO, 0, 0, 0, 0},
     {"Tap PERFORM: open", 14, MK_INFO, 0, 0, 0, 0}, {"Tap column: level", 14, MK_INFO, 0, 0, 0, 0},
     {"1A-1D: fine tune", 14, MK_INFO, 0, 0, 0, 0}, {"SELECT: scroll", 14, MK_INFO, 0, 0, 0, 0},
     {"Empty row btn: add", 14, MK_INFO, 0, 0, 0, 0}, {"SH+row: remove", 14, MK_INFO, 0, 0, 0, 0},
     {"Row+1A-C: CC/ch/col", 14, MK_INFO, 0, 0, 0, 0},
-    {"KNOB MODE: bank 1-4", 15, MK_INFO, 0, 0, 0, 0}, {"  (nothing held)", 15, MK_INFO, 0, 0, 0, 0},
-    {"Lit light: bank", 15, MK_INFO, 0, 0, 0, 0}, {"BROWSER>Knobs: edit", 15, MK_INFO, 0, 0, 0, 0},
+    {"KNOB MODE: bank 1-4", 15, MK_INFO, 0, 0, 0, 0}, {"  tap; hold = roll", 15, MK_INFO, 0, 0, 0, 0},
+    {"Lit light: bank", 15, MK_INFO, 0, 0, 0, 0}, {"Own banks per mode", 15, MK_INFO, 0, 0, 0, 0}, {"BROWSER>Knobs: edit", 15, MK_INFO, 0, 0, 0, 0},
+    /* page 16: memory (v0.26): how much room the steps have left (read-only) */
+    {"Drum steps left", 16, MK_ROOM, 0, 0, 0, 0}, {"Note steps left", 16, MK_ROOM, 0, 1, 0, 0},
+    {"Memory used", 16, MK_ROOM, 0, 2, 0, 0},
 };
 #define MENU_ALL ((int)(sizeof MENU / sizeof MENU[0]))
-#define MENU_PAGES 16
+#define MENU_PAGES 17
 #define MENU_PAGE_MAX 16                            /* the most items one page may hold (draw_menu's arrays) */
 static const char *const MENU_TITLE[MENU_PAGES] = {"Menu", "Lights", "Playing", "Knobs", "Display", "Shortcuts",
-    "Steps", "Hold step", "Hold row", "Patterns", "Song edit", "Playing", "Note mode", "Drum mode", "Faders", "Knobs"};   /* <= 10 characters: room before "BRW=back" */
-static const uint8_t MENU_PARENT[MENU_PAGES] = {0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5};   /* where BROWSER goes back to */
+    "Steps", "Hold step", "Hold row", "Patterns", "Song edit", "Playing", "Note mode", "Drum mode", "Faders", "Knobs", "Memory"};   /* <= 10 characters: room before "BRW=back" */
+static const uint8_t MENU_PARENT[MENU_PAGES] = {0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0};   /* where BROWSER goes back to */
 
 static int menu_count(void)                         /* items on the open page */
 {
@@ -1188,7 +1477,7 @@ static void menu_surface_now(void)
 {
     if (!surf_known) { menu_toast_set("no ORC surface yet"); return; }
     menu_on = menu_edit = false; menu_grp = 0; menu_sel = 0;
-    surface_on = true; lights_off(); song_edit = false; held_t = held_s = -1; held_pad = -1;
+    surface_on = true; lights_off(); song_edit = false; trkvol = false; held_t = held_s = -1; held_pad = -1;
     dirty = true;
 }
 static void menu_value(const mitem_t *m, char *o)
@@ -1206,15 +1495,23 @@ static void menu_value(const mitem_t *m, char *o)
     case MK_TEMPO: o = cat_int(o, BPM); cat(o, " bpm"); break;
     case MK_SWING: o = cat_int(o, G.swing); cat(o, "%"); break;
     case MK_CLOCK: cat(o, G.clock_out ? "on" : "off"); break;
-    case MK_KBANK: cat_int(o, (G.knob_bank & 3) + 1); break;
-    case MK_KSEL: { char kn[3] = {(char)('1' + (G.knob_bank & 3)), (char)('A' + (menu_knob & 3)), 0}; cat(o, kn); break; }   /* bank + knob: 3C */
+    case MK_ROOM: {                                 /* Memory page: what the shared step pool still has room for */
+        uint32_t room = steps_room();
+        if (m->n == 0) cat_int(o, (int)(room / ST_DRUM_SIZE));
+        else if (m->n == 1) cat_int(o, (int)(room / ST_MEL_SIZE));
+        else { o = cat_int(o, (int)(((ST_POOL - room) * 100u + ST_POOL - 1u) / ST_POOL)); cat(o, "%"); }   /* rounded up: full = 100 */
+        break;
+    }
+    case MK_KSEC: cat(o, NM_KCTX[menu_kc % KC_N]); break;
+    case MK_KBANK: cat_int(o, (*kc_bank(menu_kc) & 3) + 1); break;
+    case MK_KSEL: { char kn[3] = {(char)('1' + (*kc_bank(menu_kc) & 3)), (char)('A' + (menu_knob & 3)), 0}; cat(o, kn); break; }   /* bank + knob: 3C */
     case MK_KFN: {
-        int f = kb_fn(G.knob_bank, menu_knob);
+        int f = kb_fn(menu_kc, *kc_bank(menu_kc), menu_knob);
         if (f == KB_SWING) cat(o, "swing"); else if (f == KB_TEMPO) cat(o, "tempo"); else { o = cat(o, "CC "); cat_int(o, f); }
         break;
     }
-    case MK_KCH: o = cat(o, "ch "); cat_int(o, kb_chan(G.knob_bank, menu_knob)); break;
-    case MK_KMODE: cat(o, NM_KMODE[G.kb_abs[G.knob_bank & 3][menu_knob] ? 1 : 0]); break;
+    case MK_KCH: o = cat(o, "ch "); cat_int(o, kb_chan(menu_kc, *kc_bank(menu_kc), menu_knob)); break;
+    case MK_KMODE: cat(o, NM_KMODE[*kc_abs(menu_kc, *kc_bank(menu_kc), menu_knob) ? 1 : 0]); break;
     default: break;
     }
 }
@@ -1228,22 +1525,23 @@ static void menu_turn(int d)
         return;
     }
     const mitem_t *m = menu_it(menu_sel);
-    int b = G.knob_bank & 3, big = fire_held(IN_SHIFT) ? 10 : 1;   /* SHIFT = steps of 10 (tempo, CC numbers) */
+    int b = *kc_bank(menu_kc) & 3, big = fire_held(IN_SHIFT) ? 10 : 1;   /* SHIFT = steps of 10 (tempo, CC numbers) */
     switch (m->kind) {
     case MK_TEMPO: { int t = (int)BPM + (d > 0 ? big : -big); BPM = (uint16_t)(t < 40 ? 40 : t > 300 ? 300 : t); touched_global(); return; }
     case MK_SWING: { int s = G.swing + (d > 0 ? 1 : -1); G.swing = (uint8_t)(s < 50 ? 50 : s > 75 ? 75 : s); touched_global(); return; }
     case MK_CLOCK: if ((d > 0) != (G.clock_out != 0)) clock_out_toggle(); return;
-    case MK_KBANK: { int nb = b + (d > 0 ? 1 : -1); G.knob_bank = (uint8_t)(nb < 0 ? 0 : nb > 3 ? 3 : nb); touched_global(); return; }
+    case MK_KSEC: { int c = menu_kc + (d > 0 ? 1 : -1); menu_kc = c < 0 ? 0 : c > KC_N - 1 ? KC_N - 1 : c; return; }
+    case MK_KBANK: { int nb = b + (d > 0 ? 1 : -1); *kc_bank(menu_kc) = (uint8_t)(nb < 0 ? 0 : nb > 3 ? 3 : nb); touched_global(); return; }
     case MK_KSEL: { int k = menu_knob + (d > 0 ? 1 : -1); menu_knob = k < 0 ? 0 : k > 3 ? 3 : k; return; }
     case MK_KFN: {                                  /* the list: swing, tempo, CC 1 .. CC 127 */
-        int f = kb_fn(b, menu_knob), i = f == KB_SWING ? 0 : f == KB_TEMPO ? 1 : f + 1;
+        int f = kb_fn(menu_kc, b, menu_knob), i = f == KB_SWING ? 0 : f == KB_TEMPO ? 1 : f + 1;
         i += d > 0 ? (i >= 2 ? big : 1) : (i > 2 ? -big : -1);
         i = i < 0 ? 0 : i > 128 ? 128 : i;
-        G.kb_fn[b][menu_knob] = (uint8_t)(i == 0 ? KB_SWING : i == 1 ? KB_TEMPO : i - 1);
+        *kc_fn(menu_kc, b, menu_knob) = (uint8_t)(i == 0 ? KB_SWING : i == 1 ? KB_TEMPO : i - 1);
         edited_global(); return;
     }
-    case MK_KCH: { int c = kb_chan(b, menu_knob) + (d > 0 ? 1 : -1); G.kb_ch[b][menu_knob] = (uint8_t)(c < 1 ? 1 : c > 16 ? 16 : c); edited_global(); return; }
-    case MK_KMODE: G.kb_abs[b][menu_knob] = d > 0 ? 1 : 0; edited_global(); return;
+    case MK_KCH: { int c = kb_chan(menu_kc, b, menu_knob) + (d > 0 ? 1 : -1); *kc_ch(menu_kc, b, menu_knob) = (uint8_t)(c < 1 ? 1 : c > 16 ? 16 : c); edited_global(); return; }
+    case MK_KMODE: *kc_abs(menu_kc, b, menu_knob) = d > 0 ? 1 : 0; edited_global(); return;
     default: break;
     }
     if (m->kind == MK_EFFECT) {                     /* the Show list, in its own order (a running show switches at once) */
@@ -1266,7 +1564,7 @@ static void menu_push(void)                         /* SELECT pushed */
     const mitem_t *m = menu_it(menu_sel);
     if (m->kind == MK_ACT) m->act();
     else if (m->kind == MK_SUB) { menu_grp = m->n; menu_sel = 0; menu_edit = false; }
-    else if (m->kind == MK_INFO) return;            /* a shortcut line: nothing to change */
+    else if (m->kind == MK_INFO || m->kind == MK_ROOM) return;   /* a shortcut line / a memory readout: nothing to change */
     else menu_edit = !menu_edit;
 }
 
@@ -1290,7 +1588,7 @@ static bool overlay_event(int idx, int pad)
         dirty = true;
         return true;
     }
-    if (idx == IN_BROWSER) { menu_on = true; menu_edit = false; menu_grp = 0; menu_sel = 0; dirty = true; return true; }
+    if (idx == IN_BROWSER) { menu_on = true; menu_edit = false; menu_grp = 0; menu_sel = 0; menu_kc = kctx(); dirty = true; return true; }
     if (!lt_on) return false;
     if (idx == IN_SHIFT || idx == IN_ALT) return false;
     if (idx == IN_PLAY) { if (!lt_manual) lights_off(); return false; }
@@ -1378,6 +1676,7 @@ static void __attribute__((noinline)) render(void)
     ctx[0] = stat[0] = 0;
     cat(stat, status_line);
     if (picker_on()) cat(ctx, "Patterns");
+    else if (roll_shown()) cat(ctx, "Roll");
     else if (mode == MODE_FADER) {
         if (held_row >= 0 && held_row_t < G.fad_n) { cat(ctx, "Fader"); stat[0] = 0; }
         else {
@@ -1388,13 +1687,17 @@ static void __attribute__((noinline)) render(void)
         }
     }
     else if (mode == MODE_NOTE) cat(ctx, "NOTE");
-    else if (mode == MODE_DRUM) cat(ctx, "DRUM");
+    else if (mode == MODE_DRUM) cat(ctx, mpcrem ? "MPC" : "DRUM");
     else if (song_edit) cat(ctx, "Song");
     else if (step_held) {
         o = cat(ctx, track_name(held_t)); o = cat(o, " step "); cat_int(o, held_s + 1);
         cat(stat, knob_page ? "pg2" : "pg1");
     }
     else if (held_row >= 0) { cat(ctx, "Track "); cat(ctx, track_name(held_row_t)); stat[0] = 0; }
+    else if (trkvol) {                              /* v0.23: the track volume faders; which tracks are on the rows */
+        cat(ctx, "Volume");
+        o = cat(stat, track_name(vtrack(view_top))); o = cat(o, "-"); cat(o, track_name(vtrack(view_top + VIEW_ROWS - 1)));
+    }
     else { o = cat(ctx, "P"); o = cat_int(o, page + 1); o = cat(o, "/"); cat_int(o, PAGES); }
     {
         scr_head_t hd = {left, (int)BPM, G.swing, ext_clock ? 2 : G.clock_out ? 1 : 0, playing || ext_playing, unsaved(), ctx, stat};
@@ -1408,6 +1711,19 @@ static void __attribute__((noinline)) render(void)
         o = cat(buf, "1A color "); cat(o, FAD_COL_NAME[pat_col_idx(p)]);
         draw_text(0, 46, buf, 1);
         if (song_active()) draw_text(0, 55, "song on: tap = pick", 1);
+    } else if (roll_shown()) {                      /* the roller: what the newest held pad does, and the layout */
+        int newest = -1;
+        for (int pad = 0; pad < 64; pad++)
+            if ((roll_pads >> pad & 1) && (newest < 0 || roll_pad[pad].seq > roll_pad[newest].seq)) newest = pad;
+        if (newest < 0) cat(buf, "ROLL: hold a pad");
+        else {
+            o = cat(buf, "ROLL "); o = cat(o, roll_pad[newest].track < 0 ? "all" : track_name(roll_pad[newest].track));
+            o = cat(o, " "); cat(o, CTL_ROLL_NAME[roll_pad[newest].code]);
+        }
+        draw_text(0, 28, buf, 1);
+        draw_text(0, 37, "left 8: all tracks", 1);
+        draw_text(0, 46, "right 8: this row", 1);
+        draw_text(0, 55, "bar..1/16 | 1/32-64", 1);
     } else if (mode == MODE_FADER && held_row >= 0 && held_row_t < G.fad_n) {   /* setting up a fader */
         int f = held_row_t;
         o = cat(buf, "Fader "); cat_int(o, f + 1);
@@ -1436,6 +1752,12 @@ static void __attribute__((noinline)) render(void)
         draw_text(56, 37, buf, 1);
         draw_text(0, 46, "GRID oct  SH=accent", 1);
         draw_text(0, 55, "SEL trk  ALT+SEL ch", 1);
+    } else if (mode == MODE_DRUM && mpcrem) {       /* the MPC remote */
+        draw_text(0, 28, "MPC", 2);
+        draw_text(56, 28, "remote ch 14", 1);
+        draw_text(56, 37, "the MPC face", 1);
+        draw_text(0, 46, "pads = MPC buttons", 1);
+        draw_text(0, 55, "DRUM: back to groups", 1);
     } else if (mode == MODE_DRUM && fire_held(IN_ALT)) {   /* editing a grid */
         int g = grid_sel;
         o = cat(buf, "Group "); cat_int(o, g + 1);
@@ -1444,14 +1766,15 @@ static void __attribute__((noinline)) render(void)
         o = cat(buf, "1A ch "); cat_int(o, grid_chan(g));
         draw_text(0, 37, buf, 1);
         if (G.grid_layout[g] == 1) cat(buf, "1B pad 1 (MPC pads)");
-        else { o = cat(buf, "1B pad 1 "); o = cat(o, note_name((uint8_t)grid_base(g))); o = cat(o, " ("); o = cat_int(o, grid_base(g)); cat(o, ")"); }
+        else { o = cat(buf, grid_lvl(g) ? "1B note " : "1B pad 1 "); o = cat(o, note_name((uint8_t)grid_base(g))); o = cat(o, " ("); o = cat_int(o, grid_base(g)); cat(o, ")"); }
         draw_text(0, 46, buf, 1);
-        draw_text(0, 55, G.grid_layout[g] == 1 ? "1C map: MPC pads" : "1C map: notes", 1);
+        draw_text(0, 55, G.grid_layout[g] == 1 ? "1C map: MPC pads" : grid_lvl(g) ? "1C map: 16 levels" : "1C map: notes", 1);
     } else if (mode == MODE_DRUM) {                 /* the four grids */
         for (int g = 0; g < 4; g++) {
             o = cat(buf, "G"); o = cat_int(o, g + 1); o = cat(o, " ch"); cat_int(o, grid_chan(g));
             draw_text(0, 28 + g * 9, buf, 1);
             if (G.grid_layout[g] == 1) cat(buf, "MPC pads");
+            else if (grid_lvl(g)) { o = cat(buf, note_name((uint8_t)grid_base(g))); cat(o, " 16 lv"); }
             else { o = cat(buf, note_name((uint8_t)grid_base(g))); o = cat(o, "-"); cat(o, note_name((uint8_t)(grid_base(g) + 15))); }
             draw_text(42, 28 + g * 9, buf, 1);
         }
@@ -1482,9 +1805,13 @@ static void __attribute__((noinline)) render(void)
         } else {
             o = cat(buf, "2A cond "); cat(o, COND_NAME[cond_of(sv.cond)]);
             draw_text(0, SCR_BODY_Y, buf, 1);
-            if (!G.lock_cc[held_t]) cat(buf, "2B lock: set CC 1st");
-            else if (!sv.lock) { o = cat(buf, "2B CC"); o = cat_int(o, G.lock_cc[held_t]); cat(o, " --"); }
-            else { o = cat(buf, "2B CC"); o = cat_int(o, G.lock_cc[held_t]); o = cat(o, " = "); cat_int(o, sv.lock - 1); }
+            uint8_t lcc = *lock_cc_p(held_t);
+            if (is_cc(held_t)) {                    /* a CC track: the step's own value (else the level's velocity) */
+                o = cat(buf, "2B value "); o = cat_int(o, sv.lock ? sv.lock - 1 : LEVEL_VEL[sv.b & 3]); if (!sv.lock) cat(o, " (lvl)");
+            }
+            else if (!lcc) cat(buf, "2B lock: set CC 1st");
+            else if (!sv.lock) { o = cat(buf, "2B CC"); o = cat_int(o, lcc); cat(o, " --"); }
+            else { o = cat(buf, "2B CC"); o = cat_int(o, lcc); o = cat(o, " = "); cat_int(o, sv.lock - 1); }
             draw_text(0, SCR_BODY_Y + SCR_ROW_H, buf, 1);
             if (is_mel(held_t)) {
                 int ci = chord_index(sv.ch2, sv.ch3);
@@ -1496,15 +1823,29 @@ static void __attribute__((noinline)) render(void)
         }
     } else if (held_row >= 0) {
         int t = held_row_t;
-        o = cat(buf, "TRACK "); cat(o, track_name(t));
+        o = cat(buf, "TRACK "); o = cat(o, track_name(t));
+        if (!is_mel(t)) cat(o, is_cc(t) ? "  1D CC" : "  1D note");   /* v0.29: knob 4 = a note or a CC track */
         draw_text(0, 28, buf, 1);
         uint8_t n = is_mel(t) ? m_cur[t - DTRACKS] : tnote(t);
         o = cat(buf, "1A ch "); o = cat_int(o, tchan(t)); o = cat(o, "  len "); cat_int(o, tlen(CURPAT, t));
         draw_text(0, 37, buf, 1);
-        o = cat(buf, is_mel(t) ? "1B new " : "1B note "); o = cat(o, note_name(n)); o = cat(o, " ("); o = cat_int(o, n); cat(o, ")");
+        if (is_cc(t)) { o = cat(buf, "1B sends CC "); cat_int(o, n); }
+        else { o = cat(buf, is_mel(t) ? "1B new " : "1B note "); o = cat(o, note_name(n)); o = cat(o, " ("); o = cat_int(o, n); cat(o, ")"); }
         draw_text(0, 46, buf, 1);
-        if (G.lock_cc[t]) { o = cat(buf, "1C lock CC "); cat_int(o, G.lock_cc[t]); } else cat(buf, "1C lock CC: none");
+        uint8_t lcc = *lock_cc_p(t);
+        if (is_cc(t)) cat(buf, "2B on a step: value");
+        else if (lcc) { o = cat(buf, "1C lock CC "); cat_int(o, lcc); } else cat(buf, "1C lock CC: none");
         draw_text(0, 55, buf, 1);
+    } else if (trkvol) {                            /* v0.23: one volume bar per track */
+        char nm[4][6];
+        const char *names[4];
+        uint8_t val[4], mu[4];
+        for (int r = 0; r < VIEW_ROWS; r++) {
+            int t = vtrack(view_top + r);
+            strcpy(nm[r], track_name(t)); names[r] = nm[r];
+            val[r] = (uint8_t)trk_level(t); mu[r] = muted(t);
+        }
+        scr_levels(names, val, mu);
     } else {                                        /* the step view: dots per step, a playhead per track */
         char nm[4][6];
         const char *names[4];
@@ -1513,11 +1854,11 @@ static void __attribute__((noinline)) render(void)
         bool run = playing || ext_playing;
         uint32_t last = gstep ? gstep - 1 : 0;
         for (int r = 0; r < VIEW_ROWS; r++) {
-            int t = view_top + r, len = tlen(CURPAT, t);
+            int t = vtrack(view_top + r), len = tlen(CURPAT, t);
             strcpy(nm[r], track_name(t)); names[r] = nm[r];
             mu[r] = muted(t);
             for (int c = 0; c < PAGE; c++) { int st = page * PAGE + c; lv[r][c] = st < len ? (uint8_t)level(CURPAT, t, st) : 255; }
-            int hs = track_pos(t, last) - page * PAGE;
+            int hs = track_pos(t, roll_g(t, last)) - page * PAGE;
             hd[r] = (has_played && run && hs >= 0 && hs < PAGE) ? (int8_t)hs : -1;
         }
         scr_tracks(names, lv, mu, hd);
@@ -1588,12 +1929,15 @@ static void record_hit(uint8_t note, uint8_t chan1, int lv, uint32_t now)
 {
     if (!(playing || ext_playing) || !gstep) return;
     int t = -1;
-    for (int i = 0; i < DTRACKS && t < 0; i++) if (tnote(i) == note && tchan(i) == chan1) t = i;
+    for (int d = 0; d < DTRACKS + XTRACKS && t < 0; d++) {   /* the drum tracks in display order: T1-T16, T17-T24 (not CC tracks) */
+        int i = vtrack(d);
+        if (!is_cc(i) && tnote(i) == note && tchan(i) == chan1 && (!is_x(i) || !track_unused(i) || G.x_note[x_of(i)])) t = i;   /* (an empty T17-T24 still on its default note doesn't catch it) */
+    }
     if (t < 0) {
-        for (int i = 0; i < DTRACKS && t < 0; i++) if (track_unused(i)) t = i;
+        for (int d = 0; d < DTRACKS + XTRACKS && t < 0; d++) { int i = vtrack(d); if (!is_cc(i) && track_unused(i)) t = i; }
         if (t < 0) { cat(status_line, "no track"); return; }
-        G.note[t] = note; G.chan[t] = chan1;
-        G.mute_bits &= (uint16_t)~(1u << t);
+        set_tnote(t, note); set_tchan(t, chan1);
+        if (muted(t)) toggle_mute(t);
         edited_global();
         char *o = cat(status_line, "rec>"); cat(o, track_name(t));
     }
@@ -1624,6 +1968,7 @@ static void record_step(int t, uint8_t note, int lv, uint32_t now)
     if (g >= gstep || (playing && pending >= 0 && (uint32_t)pending == g))
         rec_skip[t] = (int32_t)g + 1;               /* that step hasn't played yet: don't play it twice */
     int P = pattern_for_step(g);                    /* a hit just before a bar that switches pattern goes into the NEW one */
+    undo_begin(P, true);                            /* the whole REC take is one edit (the gesture stays open while REC records) */
     int s = (int)(g % (uint32_t)tlen(P, t));
     uint8_t old = steps_get(P, t, s);
     bool ok = true;
@@ -1647,13 +1992,32 @@ static void record_step(int t, uint8_t note, int lv, uint32_t now)
     touched_pattern(P);                             /* a live hit: saved with the next save / at STOP */
 }
 
+/* SHIFT + REC: back to the undo point (the state there now becomes the redo). */
+static void undo_do(void)
+{
+    undo_open = false;                              /* a running gesture (a REC take) ends here: its next change is a new edit */
+    if (undo_pat < 0 || !undo_len[undo_cur]) { cat(status_line, undo_big ? "undo: too big" : "no undo"); dirty = true; return; }
+    int p = undo_pat, spare = undo_cur ^ 1;
+    bool keep = undo_take(p, spare);                /* what is there now: the redo */
+    cancel_save_of(KIND_PAT(p));                    /* a save of p reads the live steps: it must not see them change */
+    if (!steps_record_load(p, undo_buf[undo_cur], undo_len[undo_cur])) { pool_full(); return; }   /* (refused = nothing changed) */
+    held_t = held_s = -1; held_pad = -1;
+    edited_pattern(p);                              /* saved like any edit (undo_open is off: not an undo point of its own) */
+    char *o = cat(status_line, undo_redo ? "redo P" : "undo P"); cat_int(o, p + 1);
+    undo_redo = !undo_redo;
+    if (keep) undo_cur = spare; else undo_pat = -1;
+    dirty = true;
+}
+
 static void set_mode(int m)
 {
     if (surface_on) { surface_on = false; dirty = true; }   /* any mode button leaves the ORC surface */
     if (m == mode) return;
     mode = m;
     held_t = held_s = -1; held_pad = -1;            /* a held step pad no longer means anything */
-    if (m != MODE_STEP) song_edit = false;
+    row_consumed = 0;                               /* nor does a pending chord of row buttons */
+    if (m != MODE_STEP) { song_edit = false; trkvol = false; }
+    if (m != MODE_DRUM) mpcrem = false;
     dirty = true;
 }
 
@@ -1670,6 +2034,7 @@ static void pattern_step(int dir, bool copy)
     int base = (queued_pat >= 0 && !song_active()) ? queued_pat : CURPAT;   /* (song mode queues slots) */
     int to = (base + (dir > 0 ? 1 : PATTERNS - 1)) % PATTERNS;
     if (copy) {
+        undo_begin(to, false);                      /* undo = the pattern copied into, as it was */
         cancel_save_of(KIND_PAT(to));
         if (!steps_copy_pattern(CURPAT, to)) { pool_full(); return; }
         G.pat_col[to] = (uint8_t)(pat_col_idx(CURPAT) + 1);   /* the copy takes the colour too */
@@ -1694,38 +2059,108 @@ static void check_hold(void)
     }
 }
 
+/* a live pad let go: end exactly the note it started, whatever the mode is now */
+static void live_release(int pad)
+{
+    if (!live[pad].on) return;
+    live[pad].on = false;
+    dirty = true;
+    if (live[pad].sx) {                             /* a surface pad: its release is a surface message too */
+        live[pad].sx = false;
+        surf_send(pad, 0);
+        return;
+    }
+    if (live[pad].cc) {                             /* an MPC panel pad: let the MPC's pad go */
+        live[pad].cc = false;
+        midi_send3((uint8_t)(0xB0 | live[pad].chan), live[pad].note, 0);
+        return;
+    }
+    if (live[pad].keys && notes_held[live[pad].note]) notes_held[live[pad].note]--;
+    bool other = false;                             /* another pad still holding the same NOTE + channel? (a held CC or surface pad with that number is not one: v0.28) */
+    for (int q = 0; q < 64; q++) if (live[q].on && !live[q].cc && !live[q].sx && live[q].note == live[pad].note && live[q].chan == live[pad].chan) other = true;
+    if (!other) midi_send3((uint8_t)(0x80 | live[pad].chan), live[pad].note, 0);
+}
+
+/* v0.28 pad release hold-off (the owner: drum pads "retrigger too easily"). The pad contacts are only debounced for
+   0.5 ms (two 2 kHz scans), so a hit that flickers as it lands or rolls off sent note-off + a fresh note-on = a
+   second hit. Now a live pad's release waits until the pad has stayed up for PAD_HOLD_MS; back down sooner = the
+   same hit, nothing sent. The press itself is still instant. Done here, not in the chain interrupt (TIM4). */
+static const uint8_t PAD_HOLD_MS[6] = {0, 10, 20, 30, 40, 60};
+#define PAD_HOLD_DEFAULT 2                          /* 20 ms */
+static uint64_t up_wait;                            /* live pads let go whose release has not counted yet */
+static uint32_t up_ms[64];                          /* when each of them went up */
+static inline unsigned pad_hold_ms(void) { return PAD_HOLD_MS[G.pad_hold % 6]; }
+
+/* the roller (see roll_pad): which step is about to sound, and what the held pads make each track do */
+static uint32_t roll_anchor(void) { return (playing && pending >= 0) ? (uint32_t)pending : gstep; }
+static bool roll_ready(void) { return roll_key && fire_held(IN_KNOBMODE) && mode == MODE_STEP && !song_edit && !surface_on && !picker_on(); }
+static bool roll_shown(void)                        /* the pads show the roller (after 150 ms of KNOB MODE, or while a roller pad is held) */
+{
+    if (mode != MODE_STEP || song_edit || surface_on || picker_on()) return false;
+    return roll_pads || (roll_ready() && (roll_key_used || ms_ticks - roll_key_ms >= 150));
+}
+static void roll_update(void)
+{
+    ctl_roll_pad_t held[64];
+    int n = 0;
+    for (int pad = 0; pad < 64; pad++) if (roll_pads >> pad & 1) held[n++] = roll_pad[pad];
+    for (int t = 0; t < TRACKS; t++) {
+        int c = ctl_roll_code(held, n, t);
+        if (c >= 0 && !roll_c1[t]) roll_at[t] = roll_anchor();   /* a roll starts at the next step; a new length keeps that start */
+        roll_c1[t] = (int8_t)(c + 1);
+    }
+    dirty = true;
+}
+static void roll_press(int pad)
+{
+    int r = pad / 16, c = pad % 16;
+    roll_pad[pad].code = (int8_t)(c % 8);
+    roll_pad[pad].track = (int8_t)(c < 8 ? -1 : vtrack(view_top + r));   /* left half: all tracks; right half: this row's */
+    roll_pad[pad].seq = ++roll_seq;
+    roll_pads |= (uint64_t)1 << pad;
+    roll_key_used = true;
+    roll_update();
+}
+static void roll_release(int pad) { roll_pads &= ~((uint64_t)1 << pad); roll_update(); }
+
+static void pads_up_due(void)
+{
+    if (!up_wait) return;
+    for (int pad = 0; pad < 64; pad++)
+        if ((up_wait >> pad & 1) && ms_ticks - up_ms[pad] >= pad_hold_ms()) {
+            up_wait &= ~((uint64_t)1 << pad);
+            if (roll_pads >> pad & 1) roll_release(pad); else live_release(pad);
+        }
+}
+
 static void __attribute__((noinline)) handle_events(uint32_t now)
 {
     check_hold();
+    pads_up_due();
     int e;
     while ((e = fire_event()) >= 0) {
         int idx = e & 0x7F;
         bool down = e & 0x80;
         int pad = pad_of_input(idx);
         lt_input_ms = ms_ticks;
-        if (pad >= 0 && !down && (lt_eat >> pad & 1)) { lt_eat &= ~((uint64_t)1 << pad); continue; }   /* the release of a press that only woke the pads */
-        if (down && overlay_event(idx, pad)) continue;   /* the menu, or lights showing: BROWSER, and the wake-up touch */
-        if (pad >= 0 && !down && live[pad].on) {    /* a live pad let go: end exactly the note it started, whatever the mode is now */
-            live[pad].on = false;
-            if (live[pad].sx) {                     /* a surface pad: its release is a surface message too */
-                live[pad].sx = false;
-                surf_send(pad, 0);
-                dirty = true;
-                continue;
-            }
-            if (live[pad].cc) {                     /* an MPC panel pad: let the MPC's pad go */
-                live[pad].cc = false;
-                midi_send3((uint8_t)(0xB0 | live[pad].chan), live[pad].note, 0);
-                dirty = true;
-                continue;
-            }
-            if (live[pad].keys && notes_held[live[pad].note]) notes_held[live[pad].note]--;
-            bool other = false;                     /* another pad still holding the same note + channel? */
-            for (int q = 0; q < 64; q++) if (live[q].on && live[q].note == live[pad].note && live[q].chan == live[pad].chan) other = true;
-            if (!other) midi_send3((uint8_t)(0x80 | live[pad].chan), live[pad].note, 0);
-            dirty = true;
+        if (pad >= 0 && (up_wait >> pad & 1)) {     /* a pad inside its release hold-off */
+            if (down) up_wait &= ~((uint64_t)1 << pad);   /* back down: the same hit goes on, nothing sent */
+            else up_ms[pad] = ms_ticks;
             continue;
         }
+        if (pad >= 0 && !down && (lt_eat >> pad & 1)) { lt_eat &= ~((uint64_t)1 << pad); continue; }   /* the release of a press that only woke the pads */
+        if (down && overlay_event(idx, pad)) continue;   /* the menu, or lights showing: BROWSER, and the wake-up touch */
+        if (pad >= 0 && !down && live[pad].on) {    /* a live pad let go: its release counts once it stays up (above) */
+            if (pad_hold_ms()) { up_wait |= (uint64_t)1 << pad; up_ms[pad] = ms_ticks; }
+            else live_release(pad);
+            continue;
+        }
+        if (pad >= 0 && !down && (roll_pads >> pad & 1)) {   /* a roller pad let go: the same hold-off as a live pad */
+            if (pad_hold_ms()) { up_wait |= (uint64_t)1 << pad; up_ms[pad] = ms_ticks; }
+            else roll_release(pad);
+            continue;
+        }
+        if (pad >= 0 && down && (roll_ready() || (roll_pads && roll_shown()))) { roll_press(pad); continue; }   /* KNOB MODE held (or a roll held): the pads are the roller */
         if (pad >= 0 && surface_on) {               /* the ORC surface: a surface message, no MIDI channel (v0.21) */
             if (!down) continue;                    /* (the release is handled above, by live[]) */
             uint8_t vel = fire_held(IN_SHIFT) ? LIVE_ACCENT : LIVE_VEL;
@@ -1747,6 +2182,10 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             dirty = true;
             continue;
         }
+        if (pad >= 0 && mode == MODE_STEP && trkvol) {   /* tap a column: that track's volume (0 left .. full right) */
+            if (down) trk_level_set(vtrack(view_top + pad / 16), ctl_trk_pad_level(pad % 16));
+            continue;
+        }
         if (pad >= 0 && mode == MODE_FADER) {       /* tap a column: that fader's level (0 left .. 127 right) */
             if (!down) continue;
             int f = fad_top + pad / 16;
@@ -1756,6 +2195,15 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
         if (pad >= 0 && mode != MODE_STEP) {
             if (!down) continue;
             int r = pad / 16, c = pad % 16;
+            if (mode == MODE_DRUM && mpcrem) {      /* the MPC remote: press that MPC button (never recorded) */
+                int ty = MPCREM[pad].type;
+                if (ty == MR_NONE) continue;
+                uint8_t ch = MPC_PANEL_CH - 1, v = MPCREM[pad].val;
+                midi_send3((uint8_t)((ty == MR_CC ? 0xB0 : 0x90) | ch), v, 127);
+                live[pad].note = v; live[pad].chan = ch; live[pad].keys = false; live[pad].sx = false; live[pad].cc = ty == MR_CC; live[pad].on = true;
+                dirty = true;
+                continue;
+            }
             if (mode == MODE_DRUM && fire_held(IN_ALT)) { grid_sel = c / 4; dirty = true; continue; }   /* ALT + tap: pick a group to edit */
             uint8_t vel = fire_held(IN_SHIFT) ? LIVE_ACCENT : LIVE_VEL, note, ch;
             if (mode == MODE_NOTE) {
@@ -1772,7 +2220,12 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
                     dirty = true;
                     continue;
                 }
-                if (rec_arm) record_hit(note, (uint8_t)(ch + 1), vel == LIVE_ACCENT ? LV_ACCENT : LV_NORMAL, now);
+                int lv = vel == LIVE_ACCENT ? LV_ACCENT : LV_NORMAL;
+                if (grid_lvl(g)) {                  /* 16 levels: the pad IS the velocity (SHIFT does nothing); recorded at the nearest level */
+                    vel = level16_vel(grid_padnum(r, c));
+                    lv = vel < 80 ? LV_SOFT : vel < 114 ? LV_NORMAL : LV_ACCENT;
+                }
+                if (rec_arm) record_hit(note, (uint8_t)(ch + 1), lv, now);
             }
             midi_send3((uint8_t)(0x90 | ch), note, vel);
             live[pad].note = note; live[pad].chan = ch; live[pad].keys = mode == MODE_NOTE; live[pad].sx = false; live[pad].cc = false; live[pad].on = true;
@@ -1802,7 +2255,7 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             continue;
         }
         if (pad >= 0) {
-            int r = pad / 16, c = pad % 16, t = view_top + r, s = page * PAGE + c;
+            int r = pad / 16, c = pad % 16, t = vtrack(view_top + r), s = page * PAGE + c;
             uint8_t st = steps_get(CURPAT, t, s);
             if (!down) {                            /* release: a lit step tapped (not edited) turns off */
                 check_hold();
@@ -1813,6 +2266,7 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
                 }
                 continue;
             }
+            undo_begin(CURPAT, false);              /* a press starts an edit (it only becomes the undo point if it changes something) */
             if (fire_held(IN_ALT)) {                /* ALT + pad: track length */
                 steps_len[CURPAT][t] = (uint8_t)(s + 1);
                 char *o = cat(status_line, "len "); cat_int(o, s + 1);
@@ -1852,11 +2306,15 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             dirty = true;
             continue;
         }
-        if (row >= 0) {                             /* hold = track settings, tap = mute */
-            if (down) { held_row = row; held_row_t = view_top + row; held_row_turned = false; }
-            else if (held_row == row) {
-                if (!held_row_turned) { toggle_mute(held_row_t); touched_global(); }
-                held_row = -1;
+        if (row >= 0) {                             /* hold = track settings, tap = mute; rows can be pressed together */
+            int turned = held_row_turned;
+            if (down) {
+                int m = ctl_row_press(&held_row, &turned, &row_consumed, row);
+                held_row_turned = turned;
+                if (m >= 0) { toggle_mute(row_trk[m]); touched_global(); }   /* a row another one landed on: its tap counts now */
+                held_row_t = vtrack(view_top + row); row_trk[row] = held_row_t;
+            } else if (ctl_row_release(&held_row, &turned, &row_consumed, row)) {
+                toggle_mute(row_trk[row]); touched_global();
             }
             dirty = true;
             continue;
@@ -1864,6 +2322,12 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
         if (!down && idx == pat_btn) {              /* PATTERN let go: if the picker wasn't used, it was a plain up / down */
             pat_btn = -1;
             if (!picker_used) pattern_step(idx == IN_PAT_UP ? 1 : -1, false);
+            dirty = true;
+            continue;
+        }
+        if (!down && idx == IN_KNOBMODE && roll_key) {   /* KNOB MODE let go: a plain tap (no roller pad) = the next knob bank */
+            roll_key = false;
+            if (!roll_key_used) { uint8_t *kb = kc_bank(kctx()); *kb = (uint8_t)((*kb + 1) & 3); touched_global(); char *ko = cat(status_line, "knobs "); cat_int(ko, *kb + 1); }
             dirty = true;
             continue;
         }
@@ -1883,8 +2347,8 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             break;
         case IN_STOP: stop(true); break;
         case IN_PATSONG:
-            if (fire_held(IN_SHIFT)) { set_mode(MODE_STEP); song_edit = !song_edit; }   /* SHIFT + PATTERN/SONG: song editor */
-            else {
+            if (!fire_held(IN_SHIFT)) { set_mode(MODE_STEP); song_edit = !song_edit; if (song_edit) trkvol = false; }   /* PATTERN/SONG: the song editor (2026-10-19: was SHIFT +) */
+            else {                                  /* SHIFT + PATTERN/SONG: song mode on / off (was a plain tap) */
                 G.song_on = !G.song_on;
                 queued_pat = -1;                    /* a queued slot / pattern means something else now */
                 if (G.song_on && song_len()) {
@@ -1896,10 +2360,19 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             }
             dirty = true;
             break;
-        case IN_STEP: set_mode(MODE_STEP); break;
+        case IN_STEP:                               /* v0.23: pressed again while on the steps = the track volume faders, and back */
+            if (fire_held(IN_ALT)) { tap_tempo(); break; }   /* v0.24: ALT + STEP = tap tempo (a plain STEP is unchanged) */
+            if (mode == MODE_STEP && !song_edit && !surface_on && !picker_on()) { trkvol = !trkvol; held_t = held_s = -1; held_pad = -1; dirty = true; }   /* a held step means nothing in the other view */
+            else set_mode(MODE_STEP);
+            break;
         case IN_NOTE: set_mode(MODE_NOTE); break;
-        case IN_DRUM: set_mode(MODE_DRUM); break;
-        case IN_REC: rec_arm = !rec_arm; dirty = true; break;
+        case IN_DRUM:                               /* v0.28: pressed again while on the groups = the MPC remote, and back */
+            if (mode == MODE_DRUM && !surface_on && !picker_on()) { mpcrem = !mpcrem; dirty = true; }
+            else set_mode(MODE_DRUM);
+            break;
+        case IN_REC:
+            if (fire_held(IN_SHIFT)) { undo_do(); break; }   /* v0.29: SHIFT + REC = undo / redo */
+            rec_arm = !rec_arm; dirty = true; break;
         case IN_GRID_L:
         case IN_GRID_R:
             if (mode == MODE_NOTE) {                /* octave (SHIFT: semitone) */
@@ -1925,9 +2398,9 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             break;
         case IN_PERFORM: perform_down_ms = ms_ticks; dirty = true; break;
         case IN_SHIFT: case IN_ALT: dirty = true; break;
-        case IN_KNOBMODE:                           /* a step held: its knob page 1 / 2; nothing held: the next knob bank */
+        case IN_KNOBMODE:                           /* a step held: its knob page 1 / 2; else held = the roller, a tap = the next knob bank (on release) */
             if (held_t >= 0 && held_row < 0) { knob_page ^= 1; held_pad_turned = true; }   /* flipping the page is an edit: releasing must not erase the step */
-            else { G.knob_bank = (uint8_t)((G.knob_bank + 1) & 3); touched_global(); char *ko = cat(status_line, "knobs "); cat_int(ko, G.knob_bank + 1); }
+            else { roll_key = true; roll_key_used = false; roll_key_ms = ms_ticks; }
             dirty = true; break;
         default: break;
         }
@@ -1971,6 +2444,10 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             if (G.song_pat[song_sel]) pat_recolour(G.song_pat[song_sel] - 1, v);
             continue;
         }
+        if (mode == MODE_STEP && trkvol && held_row < 0 && !surface_on) {   /* knob k = row k's track volume, fine */
+            trk_level_set(vtrack(view_top + k), trk_level(vtrack(view_top + k)) + v);
+            continue;
+        }
         if (mode == MODE_FADER) {
             if (held_row >= 0) {                    /* setting up the held fader: CC, channel, colour */
                 int f = held_row_t;
@@ -1983,11 +2460,16 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             } else if (fad_top + k < G.fad_n) fader_set(fad_top + k, G.fad_val[fad_top + k] + v);   /* knob k = row k's fader, fine */
             continue;
         }
-        if (mode == MODE_DRUM && fire_held(IN_ALT) && k < 3) {   /* editing a group: channel, pad 1's note, map */
+        if (mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 3) {   /* editing a group: channel, pad 1's note, map */
             int g = grid_sel;
             if (k == 0) { if (grid_mpc(g)) continue; int c = grid_chan(g) + v; G.grid_chan[g] = (uint8_t)(c < 1 ? 1 : c > 16 ? 16 : c); }   /* MPC pads: always ch 14 */
-            else if (k == 1) { int b = grid_base(g) + v; G.grid_base[g] = (uint8_t)(b < 1 ? 1 : b > 112 ? 112 : b); G.grid_layout[g] = 0; }
-            else G.grid_layout[g] = v > 0 ? 1 : 0;   /* clockwise = MPC pads, back = chromatic */
+            else if (k == 1) { int b = grid_base(g) + v; G.grid_base[g] = (uint8_t)(b < 1 ? 1 : b > 112 ? 112 : b); if (grid_mpc(g)) G.grid_layout[g] = 0; }   /* (MPC pads have no note: back to notes) */
+            else {                                  /* the map, clockwise: notes -> 16 levels -> MPC pads */
+                static const uint8_t ORDER[3] = {0, 2, 1};
+                int i = G.grid_layout[g] == 2 ? 1 : G.grid_layout[g] == 1 ? 2 : 0;
+                i += v > 0 ? 1 : -1; i = i < 0 ? 0 : i > 2 ? 2 : i;
+                G.grid_layout[g] = ORDER[i];
+            }
             dirty = true; edited_global();
             continue;
         }
@@ -2015,7 +2497,7 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             } else {
                 if (k == 0) { int c = cond_of(sv.cond) + v; c = c < 0 ? 0 : c > C_COUNT - 1 ? C_COUNT - 1 : c; sv.cond = (uint8_t)((sv.cond & 0xC0) | c); }
                 else if (k == 1) {                  /* lock value: off <-> 0..127 (first turn up lands on 64) */
-                    if (!G.lock_cc[held_t]) continue;   /* the track has no lock CC yet (hold its row + knob 3) */
+                    if (!*lock_cc_p(held_t) && !is_cc(held_t)) continue;   /* the track has no lock CC yet (hold its row + knob 3); a CC track's value needs none */
                     int l = sv.lock;
                     if (!l && v > 0) l = 65 + (v - 1); else l += v;
                     sv.lock = (uint8_t)(l < 0 ? 0 : l > 128 ? 128 : l);
@@ -2031,22 +2513,31 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             continue;
         }
         if (held_row >= 0) {
-            if (k == 3) continue;                   /* knob 4 does nothing while a row is held */
             int t = held_row_t;
+            if (k == 3) {                           /* v0.29: knob 4 = a note track (back) or a CC track (clockwise); drum tracks only */
+                if (is_mel(t) || (v > 0) == is_cc(t)) continue;
+                held_row_turned = true;
+                if (held_notes[t].n) { play_release(&held_notes[t], &OUT); batch_flush(); }   /* a tied note must not hang */
+                G.cc_trk[t >> 3] ^= (uint8_t)(1u << (t & 7));
+                dirty = true; edited_global();
+                continue;
+            }
             held_row_turned = true;
             if (k == 2) {                           /* the CC this track's step locks send */
-                int c = G.lock_cc[t] + v;
-                G.lock_cc[t] = (uint8_t)(c < 0 ? 0 : c > 127 ? 127 : c);
+                if (is_cc(t)) continue;             /* (a CC track's steps carry their value: no lock CC) */
+                uint8_t *lc = lock_cc_p(t);
+                int c = *lc + v;
+                *lc = (uint8_t)(c < 0 ? 0 : c > 127 ? 127 : c);
                 dirty = true; edited_global();
                 continue;
             }
             if (k == 1 && is_mel(t)) { int n = m_cur[t - DTRACKS] + v; m_cur[t - DTRACKS] = (uint8_t)(n < 1 ? 1 : n > 127 ? 127 : n); dirty = true; continue; }
-            if (k == 1) { int n = tnote(t) + v; G.note[t] = (uint8_t)(n < 1 ? 1 : n > 127 ? 127 : n); }
-            else { int c = tchan(t) + v; c = c < 1 ? 1 : c > 16 ? 16 : c; if (is_mel(t)) G.m_chan[t - DTRACKS] = (uint8_t)c; else G.chan[t] = (uint8_t)c; }
+            if (k == 1) { int n = tnote(t) + v; set_tnote(t, (uint8_t)(n < 1 ? 1 : n > 127 ? 127 : n)); }   /* (a CC track: CC 1-127; 0 = "default" in the record) */
+            else { int c = tchan(t) + v; c = c < 1 ? 1 : c > 16 ? 16 : c; set_tchan(t, (uint8_t)c); }
             dirty = true; edited_global();
             continue;
         }
-        int b = G.knob_bank & 3, f = kb_fn(b, k);   /* nothing held: the knob does what its bank says */
+        int kc = kctx(), b = *kc_bank(kc) & 3, f = kb_fn(kc, b, k);   /* nothing held: the knob does what its section's bank says */
         if (f == KB_SWING) {
             int s = G.swing + v;
             G.swing = (uint8_t)(s < 50 ? 50 : s > 75 ? 75 : s);
@@ -2059,13 +2550,14 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             dirty = true; touched_global(); pop_kind = 1; pop_ms = ms_ticks;
             continue;
         }
-        uint8_t ch = (uint8_t)(kb_chan(b, k) - 1);
+        uint8_t ch = (uint8_t)(kb_chan(kc, b, k) - 1);
         char *o;
-        if (G.kb_abs[b][k]) {                       /* absolute: the knob moves a value 0-127 and sends it */
-            int x = kb_val[b][k] + v;
-            kb_val[b][k] = (uint8_t)(x < 0 ? 0 : x > 127 ? 127 : x);
-            midi_send3((uint8_t)(0xB0 | ch), (uint8_t)f, kb_val[b][k]);
-            o = cat(status_line, "CC"); o = cat_int(o, f); o = cat(o, "="); cat_int(o, kb_val[b][k]);
+        if (*kc_abs(kc, b, k)) {                    /* absolute: the knob moves a value 0-127 and sends it */
+            uint8_t *kv = &kb_val[kc][b][k];
+            int x = *kv + v;
+            *kv = (uint8_t)(x < 0 ? 0 : x > 127 ? 127 : x);
+            midi_send3((uint8_t)(0xB0 | ch), (uint8_t)f, *kv);
+            o = cat(status_line, "CC"); o = cat_int(o, f); o = cat(o, "="); cat_int(o, *kv);
         } else {                                    /* relative: 64 +- steps (65 = one step clockwise) */
             if (v > 63) v = 63;
             if (v < -63) v = -63;
@@ -2075,6 +2567,8 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
         }
         dirty = true;
     }
+    /* an edit gesture ends when no step pad is held any more and no REC take (a hit recorded) is running */
+    if (undo_open && held_pad < 0 && !(undo_rec && rec_arm && (playing || ext_playing))) undo_open = false;
 }
 
 /* ---------- MIDI in ---------- */
@@ -2205,7 +2699,7 @@ static void __attribute__((noinline)) host_cmd(const uint8_t *p, unsigned n)
     case HC_SURFACE:                                /* 0B: surface on (channel) / off */
         if (h.arg) {
             surf_ch = (uint8_t)(h.arg - 1); surf_known = true;
-            if (!surface_on) { surface_on = true; lights_off(); song_edit = false; held_t = held_s = -1; held_pad = -1; }
+            if (!surface_on) { surface_on = true; lights_off(); song_edit = false; trkvol = false; held_t = held_s = -1; held_pad = -1; }
         } else surface_on = false;
         dirty = true;
         break;
@@ -2257,7 +2751,7 @@ static void __attribute__((noinline)) midi_in_byte(uint8_t b, uint32_t now)
     }
     if (b == 0xFA) {
         all_notes_off();                            /* a start without a stop first: clean slate */
-        ext_clock = true; ext_last_ms = ms_ticks; playing = false; ext_playing = true; ext_ticks = 0; gstep = 0;
+        ext_clock = true; ext_last_ms = ms_ticks; playing = false; ext_playing = true; ext_ticks = 0; gstep = 0; memset(roll_at, 0, sizeof roll_at);
         ext_step_at = ext_even_at = ext_step_len = 0; ext_odd_due = false; rec_chord_t = -1;
         if (song_active()) song_goto(0);
         dirty = true; return;
@@ -2412,6 +2906,8 @@ static void load_state(void)
         if (G.bpm < 40 || G.bpm > 300) G.bpm = 120;
         if (G.swing < 50 || G.swing > 75) G.swing = 50;
         G.cur_pat %= PATTERNS;
+        for (int t = 0; t < TRACKS; t++) if (*trk_lvl_p(t) > 127) *trk_lvl_p(t) = 0;   /* v0.23: a junk byte plays at full volume */
+        for (int i = 0; i < 4; i++) G.cc_trk[i] &= (uint8_t)(i == 2 ? 0x00 : 0xFF);  /* v0.29: tracks 16-23 (melodic) are never CC tracks */
         if (!G.fad_init) faders_default();          /* a save from before v0.13 */
         if (!G.lt_init) lights_defaults();          /* a save from before the lights */
         if (!G.lt_idle_v18) {                       /* v0.18, once: the lights never start by themselves (the owner: not wanted) */
@@ -2484,6 +2980,10 @@ int main(void)
     oled_init();
     fire_hw_init();
     load_state();
+    if (!G.pad_hold_v28) { G.pad_hold = PAD_HOLD_DEFAULT; G.pad_hold_v28 = 1; }   /* v0.28: a save from before the hold-off (or none) gets 20 ms */
+    G.pad_hold %= 6;
+    kc_init_copies();                               /* v0.29: the per-section knob banks start as the STEP ones */
+    memset(kb_val, 64, sizeof kb_val);
     crash_load(&crash_boot);
     if (crash_boot.valid) cat(status_line, crash_boot.cause == CRASH_WDOG ? "WDOG RST" : "FAULT RST");   /* the header's status slot */
 
@@ -2548,7 +3048,7 @@ int main(void)
                     .idle_s = LT_IDLE_S[G.lt_idle % 6], .lt_on = lt_on, .menu_on = menu_on,
                     .playing = playing, .ext_playing = ext_playing,
                     .held = held_t >= 0 || held_row >= 0 || held_pad >= 0 || pat_btn >= 0 || live_held,
-                    .editing = song_edit || picker_on() || rec_arm || surface_on,
+                    .editing = song_edit || trkvol || picker_on() || rec_arm || surface_on,
                     .modifier = fire_held(IN_SHIFT) || fire_held(IN_ALT),
                     .now_ms = ms_ticks, .last_input_ms = lt_input_ms,
                 };

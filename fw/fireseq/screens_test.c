@@ -7,7 +7,7 @@
 #include "screens.h"
 
 static int fails, checks;
-#define EXPECTED 14                              /* the number of checks a full run makes: a drift fails the run */
+#define EXPECTED 16                              /* the number of checks a full run makes: a drift fails the run */
 #define CHECK(c, msg) do { checks++; if (!(c)) { printf("FAIL: %s\n", msg); fails++; } } while (0)
 
 static void save(int n)
@@ -111,6 +111,14 @@ int main(void)
     CHECK(lit(0, 21, 127, 62) > none, "playhead adds pixels");
     CHECK(fb[(40 >> 3) * FB_W + (20 + 6 * 6 - 1)] >> (40 & 7) & 1, "row 2's playhead lane at the left of its column");
     CHECK(!(fb[(25 >> 3) * FB_W + (20 + 6 * 6 - 1)] >> (25 & 7) & 1), "no lane on a row without a playhead");
+
+    /* per-track volume bars: a fuller level lights more of the bar, a muted row shows M, nothing spills past the rule */
+    draw_clear(); scr_levels(NAME, (uint8_t[4]){0, 32, 64, 127}, (uint8_t[4]){0, 0, 0, 0});
+    int l0 = lit(24, 22, 82, 29), l1 = lit(24, 32, 82, 39), l3 = lit(24, 52, 82, 59);
+    CHECK(l0 < l1 && l1 < l3, "the volume bar lights more as the level rises");
+    draw_clear(); scr_levels(NAME, (uint8_t[4]){127, 127, 127, 127}, (uint8_t[4]){0, 1, 0, 0});
+    CHECK(lit(88, 32, 94, 39) > 0 && lit(88, 22, 94, 29) == 0 && lit(0, 0, 127, 19) == 0,
+          "a muted track shows M on its own row, and the header area stays untouched");
 
     /* a header never writes below its rule, a status too long for the room is cut */
     draw_clear();

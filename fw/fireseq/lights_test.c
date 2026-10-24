@@ -84,7 +84,7 @@ int main(int argc, char **argv)
     lights_cols(LT_M_HITS, 0, 0, 16, whole);
     long any = 0; for (int i = 0; i < 64; i++) any += whole[i][0] + whole[i][1] + whole[i][2];
     CHECK(any == 0, "bars fall to dark");
-    lights_hit(-1, 3); lights_hit(24, 3); lights_hit(0, 0);   /* ignored */
+    lights_hit(-1, 3); lights_hit(32, 3); lights_hit(0, 0);   /* ignored */
     lights_cols(LT_M_HITS, 0, 0, 16, whole);
     any = 0; for (int i = 0; i < 64; i++) any += whole[i][0] + whole[i][1] + whole[i][2];
     CHECK(any == 0, "out-of-range hits are ignored");

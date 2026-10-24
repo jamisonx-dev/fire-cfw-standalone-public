@@ -32,6 +32,9 @@ void scr_tracks(const char *const name[4], const uint8_t lv[4][16], const uint8_
 typedef struct { int used; int num, cc, val; } scr_fader_t;
 void scr_faders(const scr_fader_t f[4]);
 
+/* Per-track volume (the STEP faders): 4 rows, a name, a bar of the 0-127 level, a percentage; muted rows show M. */
+void scr_levels(const char *const name[4], const uint8_t val[4], const uint8_t muted[4]);
+
 /* A held step's first knob page: K1 ratchet 1-4, K2 chance %, K3 note (melodic), K4 gate % or TIE / SLIDE. */
 typedef struct {
     int ratchet, chance;            /* 1-4; 25 / 50 / 75 / 100 */

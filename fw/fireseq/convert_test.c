@@ -27,7 +27,7 @@ static int fails, checks;
 static step_t truth[ST_PATTERNS][ST_TRACKS][ST_MAXSTEPS];
 static uint8_t tlen_[ST_PATTERNS][ST_TRACKS];
 static bool have[ST_PATTERNS];
-static int mel(int t) { return t >= ST_MEL_FIRST; }
+static int mel(int t) { return st_mel(t); }
 
 /* independent decoders */
 static void decode_full(int p, const uint8_t *r, uint32_t len)
@@ -43,12 +43,13 @@ static void decode_full(int p, const uint8_t *r, uint32_t len)
             for (int s = 0; s < 128; s++) { uint8_t b = r[2072 + i * 128 + s]; if (b & 3) { truth[p][16 + i][s].b = b; truth[p][16 + i][s].note = r[3096 + i * 128 + s]; } }
         }
 }
-static void decode_sparse(int p, const uint8_t *r, uint32_t hdr, uint32_t dsz, uint32_t msz)
+static void decode_sparse(int p, const uint8_t *r, uint32_t hdr, int nt, uint32_t dsz, uint32_t msz)
 {
     memset(truth[p], 0, sizeof truth[p]);
-    const uint8_t *lens = r + hdr - 408, *maps = lens + 24, *d = r + hdr;
-    for (int t = 0; t < 24; t++) tlen_[p][t] = lens[t];
-    for (int t = 0; t < 24; t++)
+    const uint8_t *lens = r + hdr - 17u * (uint32_t)nt, *maps = lens + nt, *d = r + hdr;
+    memset(tlen_[p], 0, sizeof tlen_[p]);
+    for (int t = 0; t < nt; t++) tlen_[p][t] = lens[t];
+    for (int t = 0; t < nt; t++)
         for (int s = 0; s < 128; s++) {
             const uint8_t *q = maps + t * 16 + (s / 32) * 4;
             uint32_t w = (uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24;
@@ -72,7 +73,7 @@ static int same(int p)
     return 1;
 }
 
-static const int PID[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+static int PID[ST_PATTERNS];                        /* (was 8 entries: patterns 9-32 read past it) */
 static void rd(const void *ctx, uint32_t off, uint8_t *dst, uint32_t n) { steps_record_read(*(const int *)ctx, off, dst, n); }
 
 static int reload_all_match(void)
@@ -89,6 +90,7 @@ static int reload_all_match(void)
 
 int main(int argc, char **argv)
 {
+    for (int p = 0; p < ST_PATTERNS; p++) PID[p] = p;
     if (argc < 2) { printf("usage: convert_test <sector5.bin>\n"); return 2; }
     FILE *f = fopen(argv[1], "rb");
     if (!f || fread(flash, 1, sizeof flash, f) != sizeof flash) { printf("can't read %s\n", argv[1]); return 2; }
@@ -106,8 +108,8 @@ int main(int argc, char **argv)
         const uint8_t *r1 = p < 8 ? store2_ptr(9 + p, &len) : 0; uint32_t len1 = len;   /* old formats: patterns 1-8 only */
         const uint8_t *r0 = p < 8 ? store2_ptr(1 + p, &len) : 0; uint32_t len0 = len;
         const char *src; bool loaded;
-        if (r2) { decode_sparse(p, r2, ST_REC_HDR, r2[1], r2[2]); loaded = steps_record_load(p, r2, len2); src = "v0.11"; }
-        else if (r1) { decode_sparse(p, r1, ST_REC_HDR_V1, 1, 2); loaded = steps_record_load_v1(p, r1, len1); src = "v0.10"; }
+        if (r2) { int nt = r2[0] == 3 ? r2[3] : ST_TRACKS_V2; decode_sparse(p, r2, 4u + 17u * (uint32_t)nt, nt, r2[1], r2[2]); loaded = steps_record_load(p, r2, len2); src = r2[0] == 3 ? "v0.29" : "v0.11"; }
+        else if (r1) { decode_sparse(p, r1, ST_REC_HDR_V1, ST_TRACKS_V2, 1, 2); loaded = steps_record_load_v1(p, r1, len1); src = "v0.10"; }
         else if (r0) { decode_full(p, r0, len0); loaded = steps_convert_full(p, r0, len0); src = "full-size"; }
         else { printf("pattern %d: no record\n", p + 1); continue; }
         have[p] = true;
@@ -121,7 +123,7 @@ int main(int argc, char **argv)
             fw_v2++;
             static step_t keep[ST_TRACKS][ST_MAXSTEPS]; static uint8_t keepl[ST_TRACKS];
             memcpy(keep, truth[p], sizeof keep); memcpy(keepl, tlen_[p], sizeof keepl);
-            decode_sparse(p, r1, ST_REC_HDR_V1, 1, 2);
+            decode_sparse(p, r1, ST_REC_HDR_V1, ST_TRACKS_V2, 1, 2);
             if (memcmp(keep, truth[p], sizeof keep) || memcmp(keepl, tlen_[p], sizeof keepl)) fw_v2_ok = 0;
             memcpy(truth[p], keep, sizeof keep); memcpy(tlen_[p], keepl, sizeof keepl);
         }

@@ -6,7 +6,7 @@
 #include "lights.h"
 
 static int fails, checks;
-#define EXPECTED 87
+#define EXPECTED 131
 #define CHECK(c, msg) do { checks++; if (!(c)) { printf("FAIL: %s\n", msg); fails++; } } while (0)
 
 int main(void)
@@ -179,6 +179,189 @@ int main(void)
     CHECK(ctl_lazy_due(5, 0xFFFFFFF0u + 0) == 0 || 1, "(sanity)");
     CHECK(ctl_lazy_due(ctl_lazy_arm(0xFFFFFFF0u), 0xFFFFFFF0u + 20000u), "armed just before the millisecond wrap, it is still due 20 s later");
     CHECK(CTL_LAZY_SAVE_MS == 20000u && CTL_CYCLE_MS == 20000u && CTL_HOST_QUIET_MS == 3000u && CTL_FRAME_US == 33000u, "the constants are what the docs say");
+
+    /* ---------------- row buttons (mute taps, several rows at once) ---------------- */
+    {
+        int held = -1, turned = 0; uint8_t con = 0;
+        CHECK(ctl_row_press(&held, &turned, &con, 0) == -1 && held == 0 && ctl_row_release(&held, &turned, &con, 0) == 1 && held == -1,
+              "one row, pressed and let go = a tap (mute)");
+        held = -1; turned = 0; con = 0;
+        ctl_row_press(&held, &turned, &con, 2); turned = 1;
+        CHECK(ctl_row_release(&held, &turned, &con, 2) == 0 && held == -1, "hold + knob turned = settings, not a tap");
+        held = -1; turned = 0; con = 0;
+        int a = ctl_row_press(&held, &turned, &con, 0);
+        int b = ctl_row_press(&held, &turned, &con, 1);
+        int r0 = ctl_row_release(&held, &turned, &con, 0);
+        int r1 = ctl_row_release(&held, &turned, &con, 1);
+        CHECK(a == -1 && b == 0 && r0 == 0 && r1 == 1 && con == 0 && held == -1,
+              "two rows pressed together: BOTH mute (row 0 when row 1 lands on it, row 1 on its release)");
+        held = -1; turned = 0; con = 0;
+        ctl_row_press(&held, &turned, &con, 0); ctl_row_press(&held, &turned, &con, 1);
+        r1 = ctl_row_release(&held, &turned, &con, 1); r0 = ctl_row_release(&held, &turned, &con, 0);
+        CHECK(r1 == 1 && r0 == 0 && con == 0, "...and the same when they come up in the other order (each mutes exactly once)");
+        held = -1; turned = 0; con = 0;
+        a = ctl_row_press(&held, &turned, &con, 0); b = ctl_row_press(&held, &turned, &con, 1);
+        int c = ctl_row_press(&held, &turned, &con, 3);
+        CHECK(a == -1 && b == 0 && c == 1 && held == 3, "three rows: each earlier one is counted as the next lands");
+        int n = ctl_row_release(&held, &turned, &con, 0) + ctl_row_release(&held, &turned, &con, 1) + ctl_row_release(&held, &turned, &con, 3);
+        CHECK(n == 1 && con == 0 && held == -1, "...and only the last one's release is still owed (3 mutes in all, none twice)");
+        CHECK(ctl_row_press(&held, &turned, &con, 2) == -1 && ctl_row_release(&held, &turned, &con, 2) == 1, "a fresh tap after a chord works as normal");
+        held = -1; turned = 0; con = 0;
+        ctl_row_press(&held, &turned, &con, 0); turned = 1;                       /* row 0 is being set up with a knob */
+        CHECK(ctl_row_press(&held, &turned, &con, 1) == -1 && con == 0,
+              "a second row pressed on a row being SET UP does not count the first as a mute");
+        CHECK(ctl_row_release(&held, &turned, &con, 0) == 0 && ctl_row_release(&held, &turned, &con, 1) == 1,
+              "...the set-up row's release is not a tap; the second row is");
+    }
+
+    /* ---------------- per-track volume (the STEP faders) ---------------- */
+    CHECK(ctl_trk_level(0) == 127 && ctl_trk_level(1) == 0 && ctl_trk_level(127) == 126 && ctl_trk_level(200) == 127,
+          "saved byte 0 = full volume (so an older save plays as before); 1..127 = level 0..126; junk reads as full");
+    {
+        int ok = 1;
+        for (int l = 0; l <= 127; l++) if (ctl_trk_level(ctl_trk_store(l)) != l) ok = 0;
+        CHECK(ok && ctl_trk_store(127) == 0 && ctl_trk_store(500) == 0 && ctl_trk_level(ctl_trk_store(-5)) == 0,
+              "every level survives store -> read; full stores as 0; out of range is clamped");
+    }
+    CHECK(ctl_trk_vel(100, 127) == 100 && ctl_trk_vel(127, 127) == 127 && ctl_trk_vel(60, 127) == 60,
+          "full volume leaves every velocity exactly alone");
+    CHECK(ctl_trk_vel(100, 64) == 50 && ctl_trk_vel(127, 64) == 64 && ctl_trk_vel(100, 0) == 1 && ctl_trk_vel(60, 1) == 1,
+          "half volume halves the velocity; the lowest level is a whisper (1), never a note-off (0)");
+    {
+        int mono = 1, prev = 0;
+        for (int l = 0; l <= 127; l++) { int v = ctl_trk_vel(127, l); if (v < prev || v < 1 || v > 127) mono = 0; prev = v; }
+        CHECK(mono, "the louder the level, the louder the note; always 1-127");
+    }
+    CHECK(ctl_trk_vel(0, 64) == 0 && ctl_trk_pad_level(0) == 0 && ctl_trk_pad_level(15) == 127 && ctl_trk_pad_level(99) == 127
+          && ctl_trk_pad_level(-3) == 0 && ctl_trk_pad_level(8) == 68,
+          "a rest stays a rest; pad column 0 = silent end, 15 = full, like the PERFORM faders");
+
+    /* ---------------- tap tempo ---------------- */
+    {
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        CHECK(ctl_tap(&st, 1000) == 0 && ctl_tap(&st, 1500) == 120, "the first tap sets nothing; the second sets the tempo (500 ms = 120 BPM)");
+        int b = 0; uint32_t now = 1500;
+        for (int i = 0; i < 12; i++) { now += 500; b = ctl_tap(&st, now); }
+        CHECK(b == 120 && st.n == CTL_TAP_MAX, "a steady count stays exactly on tempo, and the window never grows past 8");
+    }
+    {
+        /* a human: every tap up to +-25 ms off a 100 BPM (600 ms) beat. Averaging the window must land within 1 BPM, where the
+           last pair alone would be off by 5+ BPM. */
+        static const int jit[10] = {0, 20, -15, 25, -20, 10, -25, 15, -10, 5};
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        int b = 0, worst_pair = 0;
+        for (int i = 0; i < 10; i++) {
+            b = ctl_tap(&st, (uint32_t)(5000 + i * 600 + jit[i]));
+            if (i) { int d = jit[i] - jit[i - 1]; int pair = 60000 / (600 + d) - 100; if (pair < 0) pair = -pair; if (pair > worst_pair) worst_pair = pair; }
+        }
+        CHECK(b >= 99 && b <= 101 && worst_pair >= 5, "sloppy taps average out to within 1 BPM (the last pair alone would be off by 5+)");
+    }
+    {
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        ctl_tap(&st, 0); ctl_tap(&st, 500); ctl_tap(&st, 1000);
+        CHECK(ctl_tap(&st, 3500) == 0 && st.n == 1, "a pause of over 2 s starts a new count (that tap sets nothing)");
+        CHECK(ctl_tap(&st, 4000) == 120, "...and the next tap of the new count sets the tempo again");
+    }
+    {
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        ctl_tap(&st, 0); ctl_tap(&st, 500); ctl_tap(&st, 1000);
+        CHECK(ctl_tap(&st, 1060) == 0 && st.n == 3, "two taps under 150 ms apart are one tap with a bouncing contact: the second is ignored");
+        CHECK(ctl_tap(&st, 1500) == 120, "...and the count carries on undisturbed");
+    }
+    {
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        ctl_tap(&st, 0); ctl_tap(&st, 500); ctl_tap(&st, 1000); ctl_tap(&st, 1500);         /* 120 BPM */
+        int c = ctl_tap(&st, 1800);                                                          /* 300 ms: a much faster count starts */
+        int d2 = ctl_tap(&st, 2100);
+        CHECK(c == 0 && d2 == 0 && st.n == 2, "a sharp change of speed restarts the window instead of averaging two tempos, and the old tempo stays until a 3rd tap confirms");
+        CHECK(ctl_tap(&st, 2400) == 200, "...the 3rd tap of the new speed sets it (-> 200 BPM)");
+        ctl_tap(&st, 2700);
+        CHECK(ctl_tap(&st, 3000) == 200, "...and it stays settled on the new tempo");
+    }
+    {
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        ctl_tap(&st, 0); ctl_tap(&st, 500); ctl_tap(&st, 1000);
+        CHECK(ctl_tap(&st, 2000) == 0 && st.n == 1, "a missed tap (one double-length interval) is not trusted: the window restarts");
+        ctl_tap_t f; memset(&f, 0, sizeof f);
+        ctl_tap(&f, 0);
+        CHECK(ctl_tap(&f, 190) == 300, "a very fast count is capped at 300 BPM");
+        ctl_tap_t sl; memset(&sl, 0, sizeof sl);
+        ctl_tap(&sl, 0);
+        CHECK(ctl_tap(&sl, 1900) == 40, "a very slow count is floored at 40 BPM");
+    }
+    {
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        uint32_t now = 0xFFFFFF00u;                                                         /* right across the millisecond wrap */
+        int b = 0;
+        for (int i = 0; i < 6; i++) { b = ctl_tap(&st, now); now += 500; }
+        CHECK(b == 120, "taps across the 49-day millisecond wrap still read 120 BPM");
+    }
+
+    /* ---------------- fader pad lights: bright up to a dim tip, dark above ---------------- */
+    {
+        int rt = 1;
+        for (int c = 0; c < 16; c++) if (ctl_fader_tip(ctl_trk_pad_level(c)) != c) rt = 0;
+        CHECK(rt, "tapping a pad puts the dim tip exactly on that pad (the tip is the inverse of the tap, for all 16 pads)");
+        int ok = 1, prev = 0;
+        for (int l = 0; l <= 127; l++) { int tp = ctl_fader_tip(l); if (tp < prev || tp < 0 || tp > 15) ok = 0; prev = tp; }
+        CHECK(ok && ctl_fader_tip(-5) == 0 && ctl_fader_tip(999) == 15, "the tip never moves down as the level rises, always on a real pad, and junk is clamped");
+        int s0 = 1;
+        for (int c = 0; c < 16; c++) if (ctl_fader_pad(c, 0) != (c == 0 ? 1 : 0)) s0 = 0;
+        CHECK(s0, "level 0: the first pad is the dim one and everything else is dark (an empty fader is still visible)");
+        int sf = 1;
+        for (int c = 0; c < 16; c++) if (ctl_fader_pad(c, 127) != (c < 15 ? 2 : 1)) sf = 0;
+        CHECK(sf, "full: pads 1-15 bright and the 16th, the tip, dim");
+        int sh = 1;
+        for (int c = 0; c < 16; c++) { int w = c < 7 ? 2 : c == 7 ? 1 : 0; if (ctl_fader_pad(c, ctl_trk_pad_level(7)) != w) sh = 0; }
+        CHECK(sh, "a tap on the 8th pad: 7 bright, the 8th dim, the other 8 dark (nothing lit above the level)");
+    }
+
+    {
+        /* review 2026-10-19: ONE late tap must not flash a wrong tempo. Steady 120, a tap 200 ms late, then back on the beat. */
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        ctl_tap(&st, 0); ctl_tap(&st, 500); ctl_tap(&st, 1000); ctl_tap(&st, 1500);
+        int seq[6]; uint32_t at[6] = {2200, 2500, 3000, 3500, 4000, 4500};
+        int worst = 0;
+        for (int i = 0; i < 6; i++) { seq[i] = ctl_tap(&st, at[i]); if (seq[i] && (seq[i] < 115 || seq[i] > 125)) worst = 1; }
+        CHECK(!worst && seq[5] == 120, "one late tap never reads as a wrong tempo (the old 120 holds), and the count recovers to 120");
+    }
+    {
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        uint32_t now = 0; int b = 0;
+        for (int i = 0; i < 10; i++) { b = ctl_tap(&st, now); now += 500; }                  /* window full at 120 */
+        int r1 = ctl_tap(&st, now + 500), r2 = ctl_tap(&st, now + 1000);                     /* a missed beat (1000 ms gap), then on tempo */
+        CHECK(b == 120 && st.n >= 2 && r1 == 0 && r2 == 0, "a missed beat with a full window restarts without changing the tempo");
+    }
+    {
+        ctl_tap_t st; memset(&st, 0, sizeof st);
+        ctl_tap(&st, 0); ctl_tap(&st, 500); ctl_tap(&st, 1000); ctl_tap(&st, 1500);
+        ctl_tap(&st, 2200);                                                                  /* a restart: on probation */
+        CHECK(ctl_tap(&st, 5000) == 0, "after a pause the count starts over (that tap sets nothing)");
+        CHECK(ctl_tap(&st, 5400) == 150, "a pause clears probation: the 2nd tap of the new count sets the tempo again (400 ms = 150)");
+    }
+
+    /* ---- the roller / looper (v0.29) ---- */
+    {
+        int ok = 1;
+        for (uint32_t g = 0; g < 300; g++) if (ctl_roll_g(g, 7, -1) != g) ok = 0;
+        CHECK(ok && ctl_roll_g(4, 9, 2) == 4, "no roll (or a step before the anchor) plays the real step");
+        /* hold a 1/4 (4-step) loop from step 5 for 8 steps, then let go: 5 6 7 8 5 6 7 8, then 13 = where it would have been */
+        uint32_t want[9] = {5, 6, 7, 8, 5, 6, 7, 8, 13}, got[9];
+        for (uint32_t g = 5; g < 14; g++) got[g - 5] = ctl_roll_g(g, 5, g < 13 ? 2 : -1);
+        CHECK(!memcmp(got, want, sizeof want), "a 1/4 loop repeats the 4 steps from the anchor; on release the real position is back");
+        CHECK(ctl_roll_g(3 + 16, 3, 0) == 3 && ctl_roll_g(3 + 15, 3, 0) == 18 && ctl_roll_g(100, 99, 4) == 99,
+              "1 bar = 16 steps from wherever it started; 1/16 = the anchor step over and over");
+        int sub = 1;
+        for (int c = 5; c < CTL_ROLL_CODES; c++) for (uint32_t g = 40; g < 60; g++) if (ctl_roll_g(g, 40, c) != 40) sub = 0;
+        CHECK(sub && ctl_roll_hits(5) == 2 && ctl_roll_hits(6) == 3 && ctl_roll_hits(7) == 4 && ctl_roll_hits(2) == 0 && ctl_roll_hits(-1) == 0,
+              "1/32, 1/48, 1/64 repeat the anchor step 2 / 3 / 4 times per step; loops keep the step's own ratchet");
+        ctl_roll_pad_t pads[4] = {{2, -1, 1}, {6, 3, 2}, {1, -1, 3}, {4, 5, 4}};   /* all 1/4, T4 1/48, all 1/2 (newer), T6 1/16 */
+        CHECK(ctl_roll_code(pads, 4, 3) == 6 && ctl_roll_code(pads, 4, 5) == 4 && ctl_roll_code(pads, 4, 0) == 1,
+              "a track's own pad beats the all-tracks pads; other tracks take the newest all-tracks pad");
+        ctl_roll_pad_t one[1] = {{6, 3, 9}};
+        CHECK(ctl_roll_code(one, 1, 2) == -1 && ctl_roll_code(one, 0, 3) == -1 && ctl_roll_code(one, 1, 3) == 6,
+              "no pad for this track and none for all = no roll");
+    }
 
     printf("ctl_test: %s (%d checks%s)\n", fails ? "FAILED" : "all passed", checks, checks == EXPECTED ? "" : " -- EXPECTED differs!");
     return (fails || checks != EXPECTED) ? 1 : 0;

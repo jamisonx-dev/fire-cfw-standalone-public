@@ -14,7 +14,7 @@ static uint8_t refl[ST_PATTERNS][ST_TRACKS];
 static int fails, checks;
 #define CHECK(c, msg) do { checks++; if (!(c)) { printf("FAIL: %s\n", msg); fails++; } } while (0)
 
-static int mel(int t) { return t >= ST_MEL_FIRST; }
+static int mel(int t) { return st_mel(t); }
 static step_t norm(int t, step_t v)                 /* what the store keeps of a write */
 {
     if (!(v.b & 3)) { memset(&v, 0, sizeof v); return v; }
@@ -55,20 +55,22 @@ static uint32_t read_record(int p)
     return len;
 }
 
-/* build a record from the dense model with given entry sizes (v1 layout if v1) */
+/* build a record from the dense model with given entry sizes: fmt 1 = the v1 layout (24 tracks), 2 = v2 (24 tracks),
+   3 = v3 with nt tracks */
 static uint8_t alt[ST_REC_HDR + 8 * ST_TRACKS * ST_MAXSTEPS];
-static uint32_t build_record(int p, int v1, uint32_t dsz, uint32_t msz)
+static uint32_t build_record(int p, int fmt, int nt, uint32_t dsz, uint32_t msz)
 {
     uint32_t o = 0;
-    if (!v1) { alt[0] = 2; alt[1] = (uint8_t)dsz; alt[2] = (uint8_t)msz; alt[3] = 0; o = 4; }
-    for (int t = 0; t < ST_TRACKS; t++) alt[o++] = refl[p][t];
-    for (int t = 0; t < ST_TRACKS; t++)
+    if (fmt != 3) nt = ST_TRACKS_V2;
+    if (fmt != 1) { alt[0] = (uint8_t)fmt; alt[1] = (uint8_t)dsz; alt[2] = (uint8_t)msz; alt[3] = fmt == 3 ? (uint8_t)nt : 0; o = 4; }
+    for (int t = 0; t < nt; t++) alt[o++] = refl[p][t];
+    for (int t = 0; t < nt; t++)
         for (int w = 0; w < 4; w++) {
             uint32_t m = 0;
             for (int b = 0; b < 32; b++) if (ref[p][t][w * 32 + b].b & 3) m |= 1u << b;
             for (int k = 0; k < 4; k++) alt[o++] = (uint8_t)(m >> (8 * k));
         }
-    for (int t = 0; t < ST_TRACKS; t++)
+    for (int t = 0; t < nt; t++)
         for (int s = 0; s < ST_MAXSTEPS; s++) {
             step_t v = ref[p][t][s];
             if (!(v.b & 3)) continue;
@@ -80,9 +82,10 @@ static uint32_t build_record(int p, int v1, uint32_t dsz, uint32_t msz)
         }
     return o;
 }
-/* the dense model as it should load from entries cut to dsz / msz bytes */
-static void ref_truncate(int p, uint32_t dsz, uint32_t msz)
+/* the dense model as it should load from entries cut to dsz / msz bytes, from a record of nt tracks (the rest empty) */
+static void ref_truncate(int p, int nt, uint32_t dsz, uint32_t msz)
 {
+    for (int t = nt; t < ST_TRACKS; t++) { memset(ref[p][t], 0, sizeof ref[p][t]); refl[p][t] = 0; }
     for (int t = 0; t < ST_TRACKS; t++) for (int s = 0; s < ST_MAXSTEPS; s++) {
         step_t *v = &ref[p][t][s];
         if (!(v->b & 3)) continue;
@@ -96,6 +99,19 @@ int main(void)
     srand(12345);
     steps_clear_all();
     CHECK(agree() && steps_used() == 0, "empty");
+    {
+        step_t d = {2, 0, 0, 0, 0, 0}, m = {2, 60, 0, 0, 0, 0}, off = {0, 0, 0, 0, 0, 0};
+        CHECK(steps_room() == ST_POOL, "room: an empty pool has all its room free");
+        steps_write(0, 0, 5, &d);
+        CHECK(steps_room() == ST_POOL - ST_DRUM_SIZE, "room: a drum step takes 3 bytes");
+        steps_write(0, ST_MEL_FIRST, 5, &m);
+        CHECK(steps_room() == ST_POOL - ST_DRUM_SIZE - ST_MEL_SIZE, "room: a melodic step takes 6 bytes");
+        steps_saved[1] = 100;                       /* a pattern whose saved record is bigger than what is live still holds its room */
+        CHECK(steps_room() == ST_POOL - ST_DRUM_SIZE - ST_MEL_SIZE - 100, "room: a pattern counts as the larger of its live size and its saved record");
+        steps_saved[1] = 0;
+        steps_write(0, 0, 5, &off); steps_write(0, ST_MEL_FIRST, 5, &off);
+        CHECK(steps_room() == ST_POOL && agree() && steps_used() == 0, "room: removing the steps gives the room back");
+    }
     step_t one = {2, 60, 0, 0, 0, 0};
     CHECK(steps_get(0, 0, 200) == 0 && !steps_write(0, 0, 200, &one) && !steps_write(ST_PATTERNS, 0, 0, &one), "out of range is refused");
 
@@ -134,22 +150,34 @@ int main(void)
     }
     CHECK(te, "track_empty matches");
 
-    /* other entry sizes: v1 (1 / 2 bytes), short v2, and future longer v2 */
+    /* other formats and entry sizes: v1 (1 / 2 bytes), v2 (24 tracks: v0.11-v0.28, the saves on the Fire), short
+       and future longer entries, a v3 with fewer tracks than today */
     {
         int fine = 1;
-        const uint32_t sizes[][3] = {{1, 1, 2}, {0, 1, 2}, {0, 2, 4}, {0, 3, 6}, {0, 4, 8}};   /* {v1?, dsz, msz} */
-        for (int k = 0; k < 5; k++) {
+        const uint32_t sizes[][4] = {{1, 24, 1, 2}, {2, 24, 1, 2}, {2, 24, 2, 4}, {2, 24, 3, 6}, {2, 24, 4, 8},
+                                     {3, 32, 3, 6}, {3, 32, 4, 8}, {3, 28, 3, 6}};   /* {format, tracks, dsz, msz} */
+        for (int k = 0; k < 8; k++) {
             int p = 2, q = 5;
-            uint32_t n = build_record(p, (int)sizes[k][0], sizes[k][1], sizes[k][2]);
-            bool r = sizes[k][0] ? steps_record_load_v1(q, alt, n) : steps_record_load(q, alt, n);
+            uint32_t n = build_record(p, (int)sizes[k][0], (int)sizes[k][1], sizes[k][2], sizes[k][3]);
+            bool r = sizes[k][0] == 1 ? steps_record_load_v1(q, alt, n) : steps_record_load(q, alt, n);
             if (!r) { printf("  sizes case %d refused\n", k); fine = 0; continue; }
-            ref_copy(p, q); ref_truncate(q, sizes[k][1], sizes[k][2]);
+            ref_copy(p, q); ref_truncate(q, (int)sizes[k][1], sizes[k][2], sizes[k][3]);
             if (!agree()) { printf("  sizes case %d disagrees\n", k); fine = 0; }
         }
-        CHECK(fine, "records with older/shorter and future/longer entries load as a prefix, the rest zero");
-        uint32_t n = build_record(1, 0, 3, 6);
+        CHECK(fine, "v1 / v2 / v3 records, older/shorter and future/longer entries, load as a prefix, the rest zero");
+        int had24 = 0;                              /* (the cases above are only meaningful if tracks 24-31 had steps) */
+        for (int t = ST_TRACKS_V2; t < ST_TRACKS; t++) for (int s = 0; s < ST_MAXSTEPS; s++) if (ref[2][t][s].b & 3) had24 = 1;
+        CHECK(had24, "pattern 3 has steps on tracks 25-32 (so a 24-track record really leaves them empty)");
+        uint32_t n = build_record(1, 2, 24, 3, 6);
         alt[0] = 1;
         CHECK(!steps_record_load(4, alt, n), "a record with an unknown format byte is refused");
+        alt[0] = 2; alt[3] = 24;
+        CHECK(!steps_record_load(4, alt, n), "a v2 record whose byte 3 is not 0 is refused");
+        n = build_record(1, 3, 32, 3, 6);
+        alt[3] = ST_TRACKS + 1;
+        CHECK(!steps_record_load(4, alt, n), "a v3 record with more tracks than the firmware has is refused (never cut)");
+        alt[3] = 0;
+        CHECK(!steps_record_load(4, alt, n), "a v3 record with 0 tracks is refused");
         CHECK(agree(), "and changes nothing");
     }
 
@@ -163,6 +191,7 @@ int main(void)
     }
     CHECK(full && steps_used() <= ST_POOL && steps_used() > ST_POOL - ST_MEL_SIZE, "pool fills up to its size");
     CHECK(unchanged, "a refused write leaves everything as it was");
+    CHECK(steps_room() == ST_POOL - steps_used() && steps_room() < ST_MEL_SIZE, "room: a full pool has less room than the smallest step needs (steps_room agrees with steps_used)");
     {
         int src = 0, dst = 1;
         uint32_t ssz = steps_record_len(src), dsz = steps_record_len(dst);
@@ -234,6 +263,24 @@ int main(void)
         memset(steps_saved, 0, sizeof steps_saved);
         steps_clear_all();
         memset(ref, 0, sizeof ref); memset(refl, 0, sizeof refl);
+    }
+
+    /* v0.29: the bulk copy (undo's snapshot) is byte for byte the record a save writes */
+    {
+        int same = 1;
+        static uint8_t fast[ST_REC_HDR + ST_POOL];
+        for (int i = 0; i < 3000; i++) {            /* some content first (the store was just cleared) */
+            int p = rand() % ST_PATTERNS, t = rand() % ST_TRACKS, s = rand() % ST_MAXSTEPS;
+            step_t v = rnd_step(); v.b |= 1;
+            steps_write(p, t, s, &v);
+            if (i % 50 == 0) steps_len[p][t] = (uint8_t)(rand() % 129);
+        }
+        for (int p = 0; p < ST_PATTERNS; p++) {
+            uint32_t len = read_record(p), n = steps_record_copy(p, fast);
+            if (n != len || memcmp(fast, rec, len)) same = 0;
+        }
+        CHECK(same, "steps_record_copy == steps_record_read for every pattern (undo snapshots = save records)");
+        steps_clear_all();
     }
 
     /* clear everything, then rebuild a pattern from a saved record into an empty store */

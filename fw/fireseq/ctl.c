@@ -128,3 +128,110 @@ uint32_t ctl_lazy_arm(uint32_t now_ms)
 }
 
 int ctl_lazy_due(uint32_t lazy_due, uint32_t now_ms) { return lazy_due != 0 && (int32_t)(now_ms - lazy_due) >= 0; }
+
+int ctl_row_press(int *held, int *turned, uint8_t *consumed, int row)
+{
+    int commit = -1;
+    if (*held >= 0 && *held != row && !*turned) {   /* a row is already down and untouched: its tap counts now */
+        commit = *held;
+        *consumed = (uint8_t)(*consumed | (1u << *held));
+    }
+    *held = row;
+    *turned = 0;
+    return commit;
+}
+
+int ctl_row_release(int *held, int *turned, uint8_t *consumed, int row)
+{
+    if (*consumed & (1u << row)) { *consumed = (uint8_t)(*consumed & ~(1u << row)); return 0; }
+    if (*held != row) return 0;                     /* not the row the knobs belong to */
+    *held = -1;
+    return !*turned;
+}
+
+int ctl_trk_level(uint8_t stored) { return stored == 0 ? 127 : (stored > 127 ? 127 : stored - 1); }
+
+uint8_t ctl_trk_store(int level)
+{
+    if (level >= 127) return 0;
+    if (level < 0) level = 0;
+    return (uint8_t)(level + 1);
+}
+
+int ctl_trk_vel(int vel, int level)
+{
+    if (vel <= 0) return vel;
+    if (level >= 127) return vel;
+    if (level < 0) level = 0;
+    int r = (vel * level + 63) / 127;
+    return r < 1 ? 1 : r;
+}
+
+int ctl_trk_pad_level(int col)
+{
+    if (col < 0) col = 0;
+    if (col > 15) col = 15;
+    return (col * 127 + 7) / 15;
+}
+
+int ctl_tap(ctl_tap_t *s, uint32_t now_ms)
+{
+    if (s->n > 0) {
+        uint32_t gap = (uint32_t)(now_ms - s->t[s->n - 1]);
+        if (gap > CTL_TAP_GAP_MS) { s->n = 0; s->probation = 0; }   /* a pause: a new count, nothing old to protect */
+        else if (gap < CTL_TAP_MIN_MS) return 0;                    /* contact bounce */
+        else if (s->n >= 2) {                                       /* far from the running tempo: a change or a missed tap */
+            uint32_t mean = (uint32_t)(s->t[s->n - 1] - s->t[0]) / (uint32_t)(s->n - 1);
+            if (gap * 100u > mean * 130u || gap * 100u < mean * 70u) { s->n = 0; s->probation = 1; }
+        }
+    }
+    if (s->n == CTL_TAP_MAX) {                                      /* window full: drop the oldest tap */
+        for (int i = 1; i < CTL_TAP_MAX; i++) s->t[i - 1] = s->t[i];
+        s->n--;
+    }
+    s->t[s->n++] = now_ms;
+    if (s->n < 2) return 0;
+    if (s->probation) { if (s->n < 3) return 0; s->probation = 0; }   /* a restart needs a 3rd tap before it changes the tempo */
+    uint32_t span = (uint32_t)(s->t[s->n - 1] - s->t[0]);
+    int bpm = (int)((60000u * (uint32_t)(s->n - 1) + span / 2) / span);
+    return bpm < 40 ? 40 : bpm > 300 ? 300 : bpm;
+}
+
+int ctl_fader_tip(int level)
+{
+    if (level < 0) level = 0;
+    if (level > 127) level = 127;
+    return (level * 15 + 63) / 127;
+}
+
+int ctl_fader_pad(int col, int level)
+{
+    int tip = ctl_fader_tip(level);
+    return col < tip ? 2 : col == tip ? 1 : 0;
+}
+
+/* ---- the roller / looper (v0.29) ---- */
+const char *const CTL_ROLL_NAME[CTL_ROLL_CODES] = {"1 bar", "1/2", "1/4", "1/8", "1/16", "1/32", "1/48", "1/64"};
+static const uint8_t ROLL_LOOP[CTL_ROLL_CODES] = {16, 8, 4, 2, 1, 1, 1, 1};   /* loop length in steps */
+static const uint8_t ROLL_HITS[CTL_ROLL_CODES] = {0, 0, 0, 0, 0, 2, 3, 4};    /* 0 = the step's own ratchet */
+
+uint32_t ctl_roll_g(uint32_t g, uint32_t anchor, int code)
+{
+    if (code < 0 || code >= CTL_ROLL_CODES || g < anchor) return g;
+    return anchor + (g - anchor) % ROLL_LOOP[code];
+}
+
+int ctl_roll_hits(int code) { return code >= 0 && code < CTL_ROLL_CODES ? ROLL_HITS[code] : 0; }
+
+int ctl_roll_code(const ctl_roll_pad_t *pads, int n, int track)
+{
+    int mine = -1, all = -1;
+    uint32_t ms = 0, as = 0;
+    for (int i = 0; i < n; i++) {
+        const ctl_roll_pad_t *p = &pads[i];
+        if (p->code < 0 || p->code >= CTL_ROLL_CODES) continue;
+        if (p->track == track && (mine < 0 || p->seq > ms)) { mine = p->code; ms = p->seq; }
+        else if (p->track < 0 && (all < 0 || p->seq > as)) { all = p->code; as = p->seq; }
+    }
+    return mine >= 0 ? mine : all;
+}

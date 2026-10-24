@@ -232,5 +232,15 @@ Emulator (`../tools/`, PC, Unicorn):
 - v0.17 / v0.17b (2026-10-14): the review fixes wired in (`ctl.c`), host status 07, build id, stack canaries
   (`-fstack-protector-strong`), stack high-water mark. RAM: 49 KB bss+data, ~16 KB left for the stack, of which
   normal use measured 1.3 KB. Flash: ~57.5 of 96 KB.
+- v0.29 (2026-10-24): **32 tracks** (storage 0-15 T1-T16, 16-23 M1-M8, 24-31 T17-T24 with drum entries; the screen
+  order is `vtrack()`: T1-T24, M1-M8), pattern records **v3** (byte 3 = the track count, so the next growth needs no
+  new format; v2 records load with tracks 24-31 empty; `convert_test` runs on the owner's real v0.28 area in
+  `run_tests.sh`). `global_t` 380 -> 418 -> 566 (x_note / x_chan / x_mute / x_lock_cc / x_trk_lvl for T17-T24, `cc_trk`
+  bits); the old per-track arrays stay 24 long (`TRACKS_V28`): reach them only through `lock_cc_p()` /
+  `trk_lvl_p()` / `tnote()` / `set_tnote()` / `tchan()` / `set_tchan()`. **CC tracks**, **undo** (2 x 1536 B
+  record buffers, gesture model in main.c), **roller** (`ctl_roll_*`, tested in ctl_test; play_step plays
+  `roll_g(t, g)` while gstep runs on), **16 levels** (DRUM group map 2), **knob banks per section** (STEP keeps
+  `kb_*`, NOTE / DRUM / MPC remote = appended `kbx_*`, copied from STEP once; `kctx()`). `global_t` ends at 566.
+  RAM: 60.3 KB bss+data (map 16 KB, pool 20 KB, undo 3 KB), ~5.2 KB left for the stack. Flash ~73 of 96 KB.
 - Open: the 2026-10-13 22:09 crash (USER_GUIDE "Crashes").
 - Next candidates: pad velocity (research log and leads: `VELOCITY_NOTES.md`), knob touch.

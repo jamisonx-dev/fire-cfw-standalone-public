@@ -25,7 +25,7 @@ items = re.findall(r'\{"([^"]*)",\s*(\d+),\s*(MK_\w+),\s*([^,]+),\s*([^,]+),\s*(
 
 WIDEST = {"MK_SUB": ">", "MK_TEMPO": "300 bpm", "MK_SWING": "75%", "MK_CLOCK": "off", "MK_KBANK": "4",
           "MK_KSEL": "4D", "MK_KFN": "CC 127", "MK_KCH": "ch 16", "MK_KMODE": "absolute", "MK_INFO": "",
-          "MK_ACT": "", "MK_SPEED": "x4.00", "MK_EFFECT": "Scanner"}
+          "MK_ACT": "", "MK_SPEED": "x4.00", "MK_EFFECT": "Scanner", "MK_ROOM": "6826"}
 pages = {}
 for name, page, kind, _v, _n, names in items:
     val = WIDEST.get(kind, "?")
