@@ -229,22 +229,23 @@ A note played here also becomes that track's current note, so steps tapped in af
 
 ### DRUM mode
 
-Each group has its own **MIDI channel** (defaults 10, 1, 2, 3) and **map**: **notes** (16 notes up from
-pad 1's note, default 36), **16 levels** (v0.29: like the MPC's, all 16 pads play the group's ONE note, pad 1
-softest (velocity 8) up to pad 16 = 127 in even steps, SHIFT does nothing; the pads light dim to bright; a recorded
-hit lands at the nearest step level: soft / normal / accent) or **MPC pads** (since 2026-10-15): each pad presses the MPC's own pad through
-the owner's JJOS2XL front-panel remote map, **CC on channel 14**: pads 1-12 = CC 20-31, pads 13-16 = CC
-52-55 (the MPC's physical pads), 127 on press, 0 on release. That works on any MPC screen (NEXT SEQ, 16 levels ...); to just
-play an MPC program's sounds, use notes on its channel. MPC pad presses are controls: they are never recorded,
-and the group's channel is fixed at 14 while it's on MPC pads. So each group can drive a different box (ORC
-drums, MPC, SP-404 ...). (In the code a group is still called a grid.)
+Each group has its own **MIDI channel** (defaults 10, 1, 2, 3) and plays **16 notes** up from pad 1's note (default
+36). So each group can drive a different box (ORC drums, MPC, SP-404 ...). (In the code a group is still called a
+grid.) To press the MPC's own pads (and the rest of its panel), use the **MPC remote** (DRUM again, below); the groups'
+old "MPC pads" map was dropped in v0.29b for it (a group saved on it plays notes again).
+
+**16 LEVELS** (v0.29b, like the MPC's): tap the **top row button** (the mute button beside the top pad row; lit while
+on). It takes the **last pad you hit**: all 16 pads of that pad's group play that pad's note, pad 1 softest (velocity 8)
+up to pad 16 = 127 in even steps (SHIFT does nothing; the pads light dim to bright). Nothing hit yet: group 1's pad 1.
+Tap it again for the normal pads. A recorded hit lands at the nearest step level (soft / normal / accent). Not saved:
+it is off after power-up.
 
 | Do | Gets |
 |---|---|
 | ALT + tap a group | choose the group to edit (the others dim) |
-| ALT held + knob 1 | its channel (not on MPC pads: always 14) |
-| ALT held + knob 2 | pad 1's note (on 16 levels: the note all 16 pads play; MPC pads switch back to notes) |
-| ALT held + knob 3 | map, clockwise: notes -> 16 levels -> MPC pads |
+| ALT held + knob 1 | its channel |
+| ALT held + knob 2 | pad 1's note |
+| Top row button | **16 levels** on / off (above) |
 | REC | record on / off (yellow LED) |
 | DRUM again | the **MPC remote** (below), and back (the DRUM light blinks while it's up) |
 
@@ -270,9 +271,10 @@ does, the first track with no steps in any pattern takes over that note and chan
 turns an accent back into a normal step.
 
 A pad lights white while held and flashes when the sequencer plays its note. The screen lists the
-four groups (e.g. `G2 ch1 C2-D#3`, or `G3 ch14 MPC pads`).
+four groups (e.g. `G2 ch1 C2-D#3`; a 16-levels group: `G1 ch10 C2 16 lv`).
 
-In NOTE and DRUM modes, the row buttons still mute the 4 tracks STEP mode last showed (their lights
+In NOTE and DRUM modes, the row buttons still mute the 4 tracks STEP mode last showed (in DRUM mode except the top one:
+16 levels) (their lights
 are off in these modes, so check the mute in STEP mode). REC records in NOTE and DRUM modes; in STEP
 mode it only lights.
 

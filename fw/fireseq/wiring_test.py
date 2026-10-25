@@ -6,7 +6,7 @@ import os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = open(os.path.join(HERE, "main.c"), encoding="utf-8").read().replace("\r\n", "\n")
 LIGHTS = open(os.path.join(HERE, "lights.c"), encoding="utf-8").read().replace("\r\n", "\n")
-EXPECTED = 94
+EXPECTED = 96
 p = f = 0
 
 
@@ -149,14 +149,11 @@ check(re.search(r"if \(!G\.lt_idle_v18\) \{[^}]*G\.lt_idle = 0;[^}]*save_force =
       "v0.18: Idle start is OFF by default and switched off once in an existing save (and that is saved)")
 
 # ── 2026-10-15: drum groups on the MPC's panel pads (the owner's JJOS2XL map, CC on ch 14) ──
-check("#define MPC_PANEL_CH 14" in SRC
-      and "static const uint8_t MPC_PAD_CC[16] = {20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 52, 53, 54, 55};" in SRC
-      and "return grid_mpc(g) ? MPC_PANEL_CH :" in code(body("grid_chan")),
-      "MPC pads: pad 1-12 = CC 20-31, 13-16 = CC 52-55, always on channel 14")
-check(re.search(r"if \(grid_mpc\(g\)\) \{\s*midi_send3\(\(uint8_t\)\(0xB0 \| ch\), note, 127\);[^}]*live\[pad\]\.cc = true;[^}]*continue;\s*\}\s*int lv = ", _ev) is not None,
-      "MPC pads: a press sends its CC = 127 and is never recorded as a note")
+check("#define MPC_PANEL_CH 14" in SRC and "grid_mpc" not in code(SRC) and "MPC_PAD_CC" not in code(SRC)
+      and "G.grid_layout[g] = 0;" in code(body("load_state")),
+      "v0.29b: the groups' MPC-pads map is gone (the remote covers it); an old saved map loads as notes")
 check(re.search(r"if \(live\[pad\]\.cc\) \{\s*live\[pad\]\.cc = false;\s*midi_send3\(\(uint8_t\)\(0xB0 \| live\[pad\]\.chan\), live\[pad\]\.note, 0\);", _lr) is not None,
-      "MPC pads: the release sends the same CC = 0 (not a note off)")
+      "MPC remote: a CC pad's release sends the same CC = 0 (not a note off)")
 
 # ── 2026-10-19: several row buttons at once; PATTERN/SONG taps ──
 check("int m = ctl_row_press(&held_row, &turned, &row_consumed, row);" in _ev
@@ -263,7 +260,7 @@ check(re.search(r"if \(mode == MODE_DRUM && mpcrem\) \{\s*int ty = MPCREM\[pad\]
                 r"midi_send3\(\(uint8_t\)\(\(ty == MR_CC \? 0xB0 : 0x90\) \| ch\), v, 127\);\s*live\[pad\]\.note = v; live\[pad\]\.chan = ch;[^\n]*live\[pad\]\.cc = ty == MR_CC; live\[pad\]\.on = true;\s*dirty = true;\s*continue;", _he) is not None
       and _he.find("if (mode == MODE_DRUM && mpcrem)") < _he.find("if (mode == MODE_DRUM && fire_held(IN_ALT)) { grid_sel"),
       "MPC remote: a pad sends its note / CC 127 on channel 14 (before ALT or recording), its release goes through live[] (CC 0 / note off)")
-check("mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 3" in _ev and "else if (mode == MODE_DRUM && mpcrem) paint_mpcrem();" in code(body("paint"))
+check("mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 2" in _ev and "else if (mode == MODE_DRUM && mpcrem) paint_mpcrem();" in code(body("paint"))
       and code(body("render")).find("mode == MODE_DRUM && mpcrem") < code(body("render")).find("mode == MODE_DRUM && fire_held(IN_ALT)"),
       "MPC remote: its own pad colours and screen; the knobs don't edit the hidden groups")
 check("if (live[q].on && !live[q].cc && !live[q].sx && live[q].note == live[pad].note && live[q].chan == live[pad].chan) other = true;" in _lr,
@@ -325,12 +322,20 @@ check("kc_init_copies();" in code(body("main")) and "if (G.kbx_init) return;" in
       "an older save: NOTE / DRUM / MPC banks start as copies of the STEP banks (nothing changes until edited)")
 _dp = code(SRC)[code(SRC).find("if (mode == MODE_DRUM && fire_held(IN_ALT)) { grid_sel"):code(SRC).find("if (rec_arm) record_hit(note, (uint8_t)(ch + 1), lv, now);")]
 check("if (grid_lvl(g)) {" in _dp and "vel = level16_vel(grid_padnum(r, c));" in _dp
-      and "grid_lvl(g) ? (uint8_t)grid_base(g)" in code(body("grid_note")) and "return (uint8_t)(((p + 1) * 127 + 8) / 16);" in code(body("level16_vel")),
-      "16 levels: every pad of the group plays its note, at the pad's velocity (pad 1 = 8 .. pad 16 = 127)")
+      and "grid_lvl(g) ? lv16_note :" in code(body("grid_note")) and "return (uint8_t)(((p + 1) * 127 + 8) / 16);" in code(body("level16_vel")),
+      "16 levels: every pad of the group plays the chosen note, at the pad's velocity (pad 1 = 8 .. pad 16 = 127)")
+check("} else { last_g = g; last_note = note; }" in _dp and "int g = last_g, n = last_note;" in code(body("lv16_toggle"))
+      and "lv16_on = true; lv16_g = g; lv16_note = (uint8_t)n;" in code(body("lv16_toggle")),
+      "16 levels takes the LAST PAD HIT in DRUM mode (its group and note), not the group's first note")
+check(re.search(r"if \(row == 0 && mode == MODE_DRUM && !mpcrem\) \{\s*if \(down\) lv16_toggle\(\);\s*continue;", _ev) is not None
+      and 0 <= _ev.find("if (row == 0 && mode == MODE_DRUM") < _ev.find("int m = ctl_row_press("),
+      "DRUM mode's top row button toggles 16 levels (instead of muting a track you can't see there)")
+check("return lv16_on && g == lv16_g;" in code(body("grid_lvl")) and "led_set(LED_ROW_G[0], lv16_on ? 7 : 1);" in code(body("paint_drums")),
+      "16 levels: only that group; the button lights while it is on")
 check("lv = vel < 80 ? LV_SOFT : vel < 114 ? LV_NORMAL : LV_ACCENT;" in _dp,
       "16 levels: a recorded hit lands at the nearest step level")
-check("static const uint8_t ORDER[3] = {0, 2, 1};" in _ev and "if (grid_mpc(g)) G.grid_layout[g] = 0;" in _ev,
-      "16 levels: 1C steps notes -> 16 levels -> MPC pads; 1B keeps 16 levels (only MPC pads, which have no note, go back to notes)")
+check("mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 2" in _ev and "grid_layout[g] = v" not in _ev,
+      "group edit: knob 1 channel, knob 2 pad 1's note, nothing else (no map knob)")
 check("if (undo_open && held_pad < 0 && !(undo_rec && rec_arm && (playing || ext_playing))) undo_open = false;" in _ev
       and "undo_begin(P, true);" in code(body("record_step")),
       "review fix: only a REC take that recorded something stays one edit; plain edits while REC is armed are separate")

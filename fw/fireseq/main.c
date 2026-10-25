@@ -281,7 +281,7 @@ typedef struct {
     /* v0.8: DRUM mode = four 4x4 pad grids side by side, each with its own channel and notes */
     uint8_t grid_chan[4];                           /* 1-16, 0 = default (10, 1, 2, 3) */
     uint8_t grid_base[4];                           /* chromatic layout: pad 1's note 1-112, 0 = 36 */
-    uint8_t grid_layout[4];                         /* 0 = chromatic from grid_base, 1 = the MPC's pads (CC), 2 = 16 levels (v0.29) */
+    uint8_t grid_layout[4];                         /* (unused since v0.29b: groups always play notes; an old 1 = MPC pads / 2 = 16 levels loads as 0) */
     /* v0.9: melodic tracks */
     uint8_t m_chan[MTRACKS];                        /* 1-16, 0 = default (M1 = 1 ... M8 = 8) */
     uint8_t m_mute;                                 /* bit i = M(i+1) muted */
@@ -389,19 +389,22 @@ static inline int kb_base(void) { return (G.kb_base >= 1 && G.kb_base <= 96) ? G
 
 /* DRUM groups ("grids" in the code): group g = columns 4g..4g+3; pad 1 bottom-left, pad 16 top-right (MPC numbering). */
 static const uint8_t GRID_DEF_CHAN[4] = {10, 1, 2, 3};
-/* Layout 1 = the MPC's front-panel pads, the owner's JJOS2XL remote map (bank A; control channel 14): pads 1-12 =
-   CC 20-31, pads 13-16 = CC 52-55. A press sends 127, the release 0: it presses the MPC's pad, so it works on any
-   MPC screen (NEXT SEQ, 16 levels ...). Plain notes to the MPC are the chromatic layout. */
+/* The MPC remote's channel (the owner's JJOS2XL panel map). v0.29b: the groups' own MPC-pads map is gone (the remote, DRUM
+   again, presses the MPC's pads and everything else). */
 #define MPC_PANEL_CH 14
-static const uint8_t MPC_PAD_CC[16] = {20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 52, 53, 54, 55};
-static inline bool grid_mpc(int g) { return G.grid_layout[g] == 1; }
-/* v0.29: 16 LEVELS (like the MPC's): all 16 pads of the group play its note (pad 1's, 1B), pad 1 softest .. pad 16 = 127 */
-static inline bool grid_lvl(int g) { return G.grid_layout[g] == 2; }
+/* 16 LEVELS (v0.29b, like the MPC's): the top row button in DRUM mode turns it on / off. It takes the LAST PAD HIT: all
+   16 pads of that pad's group play that pad's note, pad 1 softest .. pad 16 = 127. Not saved (off at power-up). */
+static bool lv16_on;
+static int lv16_g;                                  /* the group it is on */
+static uint8_t lv16_note;                           /* the note all its pads play */
+static int last_g = -1;                             /* the last pad hit in DRUM mode (a notes group): its group, note */
+static uint8_t last_note;
+static inline bool grid_lvl(int g) { return lv16_on && g == lv16_g; }
 static inline uint8_t level16_vel(int p) { return (uint8_t)(((p + 1) * 127 + 8) / 16); }   /* pad 0-15 -> 8, 16 ... 127 */
-static inline uint8_t grid_chan(int g) { return grid_mpc(g) ? MPC_PANEL_CH : (G.grid_chan[g] >= 1 && G.grid_chan[g] <= 16) ? G.grid_chan[g] : GRID_DEF_CHAN[g]; }
+static inline uint8_t grid_chan(int g) { return (G.grid_chan[g] >= 1 && G.grid_chan[g] <= 16) ? G.grid_chan[g] : GRID_DEF_CHAN[g]; }
 static inline int grid_base(int g) { return (G.grid_base[g] >= 1 && G.grid_base[g] <= 112) ? G.grid_base[g] : 36; }
 static inline int grid_padnum(int r, int c) { return (3 - r) * 4 + c % 4; }          /* 0-15 = pad 1-16 */
-static inline uint8_t grid_note(int g, int p) { return grid_mpc(g) ? MPC_PAD_CC[p] : grid_lvl(g) ? (uint8_t)grid_base(g) : (uint8_t)(grid_base(g) + p); }   /* MPC: the CC number */
+static inline uint8_t grid_note(int g, int p) { return grid_lvl(g) ? lv16_note : (uint8_t)(grid_base(g) + p); }
 
 /* v0.28: DRUM pressed again = the MPC REMOTE: the owner's whole MPC1000 / JJOS2XL face on the 64 pads (his layout,
    2026-10-23; his panel map on channel 14, notes counted C3 = 60 like the MPC). Each pad IS that MPC button: press and
@@ -952,7 +955,7 @@ static void paint_drums(void)
             int k = grid_lvl(g) ? 1 + p * 4 / 15 : p == 0 ? 3 : 2;   /* 16 levels: dim (soft) .. bright (hard) */
             if (editing && g != grid_sel) k = 1;     /* ALT held: the grid being edited stands out */
             for (int t = 0; t < TRACKS; t++)        /* the sequencer just played this pad's note (drum tracks, not CC ones) */
-                if (!is_mel(t) && !is_cc(t) && !grid_mpc(g) && flash_ms[t] && ms_ticks - flash_ms[t] < 90 && tnote(t) == note && tchan(t) == ch) { k = 7; break; }
+                if (!is_mel(t) && !is_cc(t) && flash_ms[t] && ms_ticks - flash_ms[t] < 90 && tnote(t) == note && tchan(t) == ch) { k = 7; break; }
             R = (rgb[0] * k + 6) / 7; Gn = (rgb[1] * k + 6) / 7; B = (rgb[2] * k + 6) / 7;
             if (live[r * 16 + c].on) R = Gn = B = 7;
             led_set(led_pad(r, c, 0), R);
@@ -960,6 +963,7 @@ static void paint_drums(void)
             led_set(led_pad(r, c, 2), B);
         }
     for (int r = 0; r < VIEW_ROWS; r++) { led_set(LED_ROW_G[r], 0); led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0); }
+    led_set(LED_ROW_G[0], lv16_on ? 7 : 1);         /* the top row button = 16 levels: lit while on */
 }
 
 /* the MPC remote: each button in its own colour, white while held, unused pads dark */
@@ -1428,7 +1432,7 @@ static const mitem_t MENU[] = {
     {"SELECT: track M1-8", 12, MK_INFO, 0, 0, 0, 0}, {"ALT+SELECT: channel", 12, MK_INFO, 0, 0, 0, 0},
     {"SH+pad: accent", 12, MK_INFO, 0, 0, 0, 0}, {"REC: record notes", 12, MK_INFO, 0, 0, 0, 0},
     {"ALT+tap: pick group", 13, MK_INFO, 0, 0, 0, 0}, {"ALT+1A: channel", 13, MK_INFO, 0, 0, 0, 0},
-    {"ALT+1B: first note", 13, MK_INFO, 0, 0, 0, 0}, {"ALT+1C: map/16 lv", 13, MK_INFO, 0, 0, 0, 0},
+    {"ALT+1B: first note", 13, MK_INFO, 0, 0, 0, 0}, {"Top row btn: 16 lv", 13, MK_INFO, 0, 0, 0, 0},
     {"SH+pad: accent", 13, MK_INFO, 0, 0, 0, 0}, {"REC: record hits", 13, MK_INFO, 0, 0, 0, 0},
     {"DRUM again: MPC", 13, MK_INFO, 0, 0, 0, 0},
     {"Tap PERFORM: open", 14, MK_INFO, 0, 0, 0, 0}, {"Tap column: level", 14, MK_INFO, 0, 0, 0, 0},
@@ -1765,16 +1769,13 @@ static void __attribute__((noinline)) render(void)
         draw_text(48, 28, "tap a group", 1);
         o = cat(buf, "1A ch "); cat_int(o, grid_chan(g));
         draw_text(0, 37, buf, 1);
-        if (G.grid_layout[g] == 1) cat(buf, "1B pad 1 (MPC pads)");
-        else { o = cat(buf, grid_lvl(g) ? "1B note " : "1B pad 1 "); o = cat(o, note_name((uint8_t)grid_base(g))); o = cat(o, " ("); o = cat_int(o, grid_base(g)); cat(o, ")"); }
+        { o = cat(buf, "1B pad 1 "); o = cat(o, note_name((uint8_t)grid_base(g))); o = cat(o, " ("); o = cat_int(o, grid_base(g)); cat(o, ")"); }
         draw_text(0, 46, buf, 1);
-        draw_text(0, 55, G.grid_layout[g] == 1 ? "1C map: MPC pads" : grid_lvl(g) ? "1C map: 16 levels" : "1C map: notes", 1);
     } else if (mode == MODE_DRUM) {                 /* the four grids */
         for (int g = 0; g < 4; g++) {
             o = cat(buf, "G"); o = cat_int(o, g + 1); o = cat(o, " ch"); cat_int(o, grid_chan(g));
             draw_text(0, 28 + g * 9, buf, 1);
-            if (G.grid_layout[g] == 1) cat(buf, "MPC pads");
-            else if (grid_lvl(g)) { o = cat(buf, note_name((uint8_t)grid_base(g))); cat(o, " 16 lv"); }
+            if (grid_lvl(g)) { o = cat(buf, note_name(lv16_note)); cat(o, " 16 lv"); }
             else { o = cat(buf, note_name((uint8_t)grid_base(g))); o = cat(o, "-"); cat(o, note_name((uint8_t)(grid_base(g) + 15))); }
             draw_text(42, 28 + g * 9, buf, 1);
         }
@@ -1990,6 +1991,18 @@ static void record_step(int t, uint8_t note, int lv, uint32_t now)
     else if ((old & 3) < lv) ok = steps_set_byte(P, t, s, (uint8_t)((old & ~3) | lv));   /* drums: never lowers an accent */
     if (!ok) { pool_full(); return; }
     touched_pattern(P);                             /* a live hit: saved with the next save / at STOP */
+}
+
+/* 16 levels on / off: on = the last pad hit's group plays that pad's note on all 16 pads (none hit yet: the first notes
+   group's pad 1). Pads held as it switches still end their own notes (live[] keeps what each sent). */
+static void lv16_toggle(void)
+{
+    if (lv16_on) { lv16_on = false; cat(status_line, "16 lv off"); dirty = true; return; }
+    int g = last_g, n = last_note;
+    if (g < 0) { g = 0; n = grid_base(0); }         /* nothing hit yet: group 1's pad 1 */
+    lv16_on = true; lv16_g = g; lv16_note = (uint8_t)n;
+    char *o = cat(status_line, "16 lv "); cat(o, note_name(lv16_note));
+    dirty = true;
 }
 
 /* SHIFT + REC: back to the undo point (the state there now becomes the redo). */
@@ -2214,17 +2227,11 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             } else {
                 int g = c / 4;
                 note = grid_note(g, grid_padnum(r, c)); ch = (uint8_t)(grid_chan(g) - 1);
-                if (grid_mpc(g)) {                  /* the MPC's own pad, pressed: a control, never recorded as a note */
-                    midi_send3((uint8_t)(0xB0 | ch), note, 127);
-                    live[pad].note = note; live[pad].chan = ch; live[pad].keys = false; live[pad].sx = false; live[pad].cc = true; live[pad].on = true;
-                    dirty = true;
-                    continue;
-                }
                 int lv = vel == LIVE_ACCENT ? LV_ACCENT : LV_NORMAL;
                 if (grid_lvl(g)) {                  /* 16 levels: the pad IS the velocity (SHIFT does nothing); recorded at the nearest level */
                     vel = level16_vel(grid_padnum(r, c));
                     lv = vel < 80 ? LV_SOFT : vel < 114 ? LV_NORMAL : LV_ACCENT;
-                }
+                } else { last_g = g; last_note = note; }   /* the pad the next 16 levels takes */
                 if (rec_arm) record_hit(note, (uint8_t)(ch + 1), lv, now);
             }
             midi_send3((uint8_t)(0x90 | ch), note, vel);
@@ -2304,6 +2311,10 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
                 held_row = -1;
             }
             dirty = true;
+            continue;
+        }
+        if (row == 0 && mode == MODE_DRUM && !mpcrem) {   /* v0.29b: DRUM mode's top row button = 16 levels on / off */
+            if (down) lv16_toggle();
             continue;
         }
         if (row >= 0) {                             /* hold = track settings, tap = mute; rows can be pressed together */
@@ -2460,16 +2471,10 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             } else if (fad_top + k < G.fad_n) fader_set(fad_top + k, G.fad_val[fad_top + k] + v);   /* knob k = row k's fader, fine */
             continue;
         }
-        if (mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 3) {   /* editing a group: channel, pad 1's note, map */
+        if (mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 2) {   /* editing a group: channel, pad 1's note */
             int g = grid_sel;
-            if (k == 0) { if (grid_mpc(g)) continue; int c = grid_chan(g) + v; G.grid_chan[g] = (uint8_t)(c < 1 ? 1 : c > 16 ? 16 : c); }   /* MPC pads: always ch 14 */
-            else if (k == 1) { int b = grid_base(g) + v; G.grid_base[g] = (uint8_t)(b < 1 ? 1 : b > 112 ? 112 : b); if (grid_mpc(g)) G.grid_layout[g] = 0; }   /* (MPC pads have no note: back to notes) */
-            else {                                  /* the map, clockwise: notes -> 16 levels -> MPC pads */
-                static const uint8_t ORDER[3] = {0, 2, 1};
-                int i = G.grid_layout[g] == 2 ? 1 : G.grid_layout[g] == 1 ? 2 : 0;
-                i += v > 0 ? 1 : -1; i = i < 0 ? 0 : i > 2 ? 2 : i;
-                G.grid_layout[g] = ORDER[i];
-            }
+            if (k == 0) { int c = grid_chan(g) + v; G.grid_chan[g] = (uint8_t)(c < 1 ? 1 : c > 16 ? 16 : c); }
+            else { int b = grid_base(g) + v; G.grid_base[g] = (uint8_t)(b < 1 ? 1 : b > 112 ? 112 : b); }
             dirty = true; edited_global();
             continue;
         }
@@ -2908,6 +2913,7 @@ static void load_state(void)
         G.cur_pat %= PATTERNS;
         for (int t = 0; t < TRACKS; t++) if (*trk_lvl_p(t) > 127) *trk_lvl_p(t) = 0;   /* v0.23: a junk byte plays at full volume */
         for (int i = 0; i < 4; i++) G.cc_trk[i] &= (uint8_t)(i == 2 ? 0x00 : 0xFF);  /* v0.29: tracks 16-23 (melodic) are never CC tracks */
+        for (int g = 0; g < 4; g++) G.grid_layout[g] = 0;   /* v0.29b: no group maps any more (MPC pads -> the remote, 16 levels -> the row button) */
         if (!G.fad_init) faders_default();          /* a save from before v0.13 */
         if (!G.lt_init) lights_defaults();          /* a save from before the lights */
         if (!G.lt_idle_v18) {                       /* v0.18, once: the lights never start by themselves (the owner: not wanted) */

@@ -6,10 +6,7 @@ d = tempfile.mkdtemp()
 for f in ("main.c", "lights.c", "fire_hw.c", "wiring_test.py"):
     shutil.copy(os.path.join(src, f), d)
 M = [  # (file, old, new)
- ("main.c", "28, 29, 30, 31, 52, 53, 54, 55};", "28, 29, 30, 31, 32, 33, 34, 35};"),
- ("main.c", "return grid_mpc(g) ? MPC_PANEL_CH :", "return grid_mpc(g) ? 10 :"),
- ("main.c", "                    midi_send3((uint8_t)(0xB0 | ch), note, 127);", "                    midi_send3((uint8_t)(0x90 | ch), note, 127);"),
- ("main.c", "                    dirty = true;\n                    continue;\n                }\n                int lv = ", "                    dirty = true;\n                }\n                int lv = "),
+ ("main.c", "        for (int g = 0; g < 4; g++) G.grid_layout[g] = 0;", "        for (int g = 0; g < 4; g++) (void)g;"),
  ("main.c", "        midi_send3((uint8_t)(0xB0 | live[pad].chan), live[pad].note, 0);", "        midi_send3((uint8_t)(0x80 | live[pad].chan), live[pad].note, 0);"),
  ("main.c", "    if (!quiet) return;\n    if (lt_slice == 0) {", "    if (!quiet || ext_playing) return;\n    if (lt_slice == 0) {"),
  ("main.c", "if (!ctl_frame_due(now, lt_last_us)) return;", "if ((int32_t)(now - lt_last_us) < 33000) return;"),
@@ -81,7 +78,7 @@ M = [  # (file, old, new)
  ("main.c", "    if (m != MODE_DRUM) mpcrem = false;\n", ""),
  ("main.c", "(ty == MR_CC ? 0xB0 : 0x90) | ch)", "(ty == MR_CC ? 0x90 : 0xB0) | ch)"),
  ("main.c", "live[pad].cc = ty == MR_CC; live[pad].on = true;", "live[pad].cc = false; live[pad].on = true;"),
- ("main.c", "mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 3", "mode == MODE_DRUM && fire_held(IN_ALT) && k < 3"),
+ ("main.c", "mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 2", "mode == MODE_DRUM && fire_held(IN_ALT) && k < 2"),
  ("main.c", "if (live[q].on && !live[q].cc && !live[q].sx && live[q].note", "if (live[q].on && live[q].note"),
  # v0.29: 32 tracks, CC tracks, undo, the roller
  ("main.c", "int t = vtrack(view_top + r), len = tlen(CURPAT, t);", "int t = view_top + r, len = tlen(CURPAT, t);"),
@@ -113,10 +110,14 @@ M = [  # (file, old, new)
  ("main.c", "    kc_init_copies();", "    /* kc_init_copies(); */"),
  ("main.c", "        uint8_t ch = (uint8_t)(kb_chan(kc, b, k) - 1);", "        uint8_t ch = (uint8_t)(kb_chan(0, b, k) - 1);"),
  ("main.c", "                    vel = level16_vel(grid_padnum(r, c));", "                    vel = LIVE_VEL;"),
- ("main.c", "grid_lvl(g) ? (uint8_t)grid_base(g) :", "grid_lvl(g) ? (uint8_t)(grid_base(g) + p) :"),
+ ("main.c", "grid_lvl(g) ? lv16_note :", "grid_lvl(g) ? (uint8_t)(grid_base(g) + p) :"),
+ ("main.c", "} else { last_g = g; last_note = note; }", "}"),
+ ("main.c", "    int g = last_g, n = last_note;", "    int g = -1, n = 0;"),
+ ("main.c", "            if (down) lv16_toggle();\n            continue;", "            if (down) lv16_toggle();"),
+ ("main.c", "return lv16_on && g == lv16_g;", "return lv16_on;"),
+ ("main.c", "led_set(LED_ROW_G[0], lv16_on ? 7 : 1);", "led_set(LED_ROW_G[0], 0);"),
  ("main.c", "lv = vel < 80 ? LV_SOFT : vel < 114 ? LV_NORMAL : LV_ACCENT;", "lv = LV_NORMAL;"),
- ("main.c", "static const uint8_t ORDER[3] = {0, 2, 1};", "static const uint8_t ORDER[3] = {0, 1, 2};"),
- ("main.c", "if (grid_mpc(g)) G.grid_layout[g] = 0;", "G.grid_layout[g] = 0;"),
+ ("main.c", "fire_held(IN_ALT) && k < 2) {", "fire_held(IN_ALT) && k < 3) {"),
  ("main.c", "&& (!is_x(i) || !track_unused(i) || G.x_note[x_of(i)])) t = i;", ") t = i;"),
  ("main.c", " || G.x_note[x_of(i)])) t = i;", ")) t = i;"),
  ("main.c", "else { roll_key = true; roll_key_used = false;", "else { roll_key = false; roll_key_used = false;"),
