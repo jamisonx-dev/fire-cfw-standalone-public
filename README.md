@@ -8,7 +8,7 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 -patterns, assignments, and settings saved internally to the device memory
 
--step sequencer with 40 tracks: 32 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step)
+-step sequencer with 32 tracks: 24 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step)
 
 -each individual sequencer track can be of any length from 1 to 128 steps and can be changed on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
 
@@ -20,7 +20,7 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 -note mode, where the notes are laid out like the fretboard of a bass guitar
 
--drum mode with four 16 pad grids side-by-side, each independently assignable
+-drum mode with four 16 pad grids side-by-side, each independently assignable, and a 16 Levels mode to get around the velocity limitations of the fire
 
 -fader mode, which reimagines the pad grid as a display of horizontal faders that can be scrolled through, each with 16-step resolution 
 
