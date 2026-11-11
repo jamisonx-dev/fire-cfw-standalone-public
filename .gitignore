@@ -6,6 +6,15 @@
 !/README.md
 !/FIRE_HARDWARE_MAP.md
 !/fw/
+!/installer/
+
+# the installer's scripts are tracked; its binaries ship only in the release zip, and backups never leave the PC
+installer/**/*.exe
+installer/**/*.bin
+installer/**/*.zip
+installer/backups/
+installer/dist/
+installer/files/COPYING*
 
 # build outputs and scratch inside fw/
 fw/**/*.bin

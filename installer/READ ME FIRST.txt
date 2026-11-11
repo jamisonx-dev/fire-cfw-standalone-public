@@ -1,0 +1,60 @@
+AKAI FIRE CUSTOM FIRMWARE (v0.29b) - INSTALLER FOR WINDOWS
+==========================================================
+
+What this does
+--------------
+Turns your Akai Fire into a standalone step sequencer (see the project page for everything it does):
+https://github.com/jamisonx-dev/fire-cfw-standalone-public
+
+Before it changes anything, it backs up your Fire's whole memory, including Akai's original firmware.
+You can go back to Akai's firmware any time with one double-click.
+
+
+To install
+----------
+1. Unzip this whole folder somewhere (Desktop is fine). Don't run it from inside the zip.
+2. Plug the Fire into the computer with USB. Close FL Studio and any other music program.
+3. Double-click  "Install custom firmware.bat".
+4. Follow the window. The first time, Windows shows an "allow changes" box for a USB driver: click Yes.
+   (If Windows says "Windows protected your PC", click "More info" then "Run anyway".)
+5. When it says DONE, the Fire restarts with the new firmware.
+
+The first time it starts, pattern 1 has a simple starter beat (kick, snare, hats on the first three rows) and
+the other 31 patterns are empty. The dim blue lines on the pads are beat marks (one every 4 steps); change or
+turn them off in BROWSER > Display.
+
+Your original firmware is saved in the "backups" folder as  ORIGINAL_Akai_firmware.bin
+KEEP THAT FILE (copy it somewhere safe too). It is the only copy of your Fire's original firmware.
+
+
+To go back to Akai's firmware
+-----------------------------
+Double-click  "Restore original Akai firmware.bat"  (same folder, with the backups folder next to it).
+It saves what is on the Fire first (your patterns included), then puts Akai's firmware back exactly.
+
+
+If something goes wrong
+-----------------------
+The Fire's startup program (Akai's bootloader) is never touched, so you can always get back in:
+  1. Unplug the Fire.
+  2. Hold STEP + NOTE + DRUM + PERFORM (the four buttons bottom left).
+  3. Keep holding them and plug it back in. The Fire stays dark: that is update mode.
+  4. Run Install or Restore again.
+If the Fire freezes or crashes while you play, it restarts itself.
+
+Questions or problems: open an issue on the project page above.
+
+
+What's in the "files" folder
+----------------------------
+fire_tool.ps1             the script both .bat files run (plain text, readable)
+fire_custom_v0.29b.bin    the firmware, built from the project's public source
+dfu-util.exe              dfu-util 0.11, the standard open-source flashing tool (GPL-2.0)
+                          https://dfu-util.sourceforge.net  (license: files\COPYING.dfu-util)
+qmk_driver_installer.exe  installs the WinUSB driver for update mode, from the QMK keyboard project (GPL-3.0)
+                          https://github.com/qmk/qmk_driver_installer
+
+Mac / Linux: no double-click version yet. With the Fire in update mode (button combo above) and dfu-util installed:
+  back up:  dfu-util -a 0 -s 0x08000000:262144 -U my_fire_backup.bin
+  install:  dfu-util -a 0 -s 0x08008000:98304 -D fire_custom_v0.29b.bin
+  restart:  dfu-util -a 0 -s 0x08000000:leave
