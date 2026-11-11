@@ -39,6 +39,9 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 A note here about some of the things one might find in addition:
 My personal copy of this firmware gets updated pretty often at this point and some of the features I put in for myself will leak into the public release. For example, pressing the DRUM key twice now goes into MPC mode, which is a map of my MPC1000 face buttons. It's a thing specific to me that I'm leaving until/unless this gets enough outside traction to make it worth removing. Another example is ORC mode, a menu option that brings up a surface specific to the ORC project. Poke around and you will find neat things, such as all the pretty visuals in lights mode.
+Some defaults in here (like displaying the line markers) may be confusing, but everything can be turned off/adjusted in the menu. 
+
+The device will show up to other things as ORC. I should probably change this, as it has become only tangentially-related to that larger project.
 
 
 **I am genuinely proud of this and I hope that other people will find this helpful in some way.**
