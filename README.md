@@ -1,6 +1,6 @@
-# Akai Fire: Custom Firmware Project
+# Akai Fire FLAME: A Custom Firmware Project
 
-Never came up with a snappy name for this one, but it's exactly what I wanted this device to be in the first place
+Finally, exactly what I wanted this thing to be in the first place. 
 
 **The Akai Fire is now a standalone step sequencer and includes:**
 
@@ -12,9 +12,9 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 -each individual sequencer track can be of any length from 1 to 128 steps and can be changed on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
 
--accents,probability & ratchets: hold a step, then add or adjust the likelihood that it will sound and/or whether any ratcheting occurs and how much. accents can be adjusted by pressing shift+step and cycles between strong, soft, and normal.
+-accents, probability, ratchets: hold a step, then turn the knobs to adjust the likelihood that it will sound, whether any ratcheting occurs, and the gate length. accents can be adjusted by pressing shift+step and cycle between strong, soft, and normal.
 
--32 patterns, autosaved after 3 sec as you write them. if a new pattern is selected, the change happens at the end of the bar, regardless of how many steps a given sequencer track may contain.
+-32 patterns, autosaved. if a new pattern is selected, the change happens at the end of the bar, regardless of how many steps a given sequencer track may contain.
 
 -song mode, where you can string the patterns together however you wish
 
@@ -24,13 +24,15 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 -fader mode, which reimagines the pad grid as a display of horizontal faders that can be scrolled through, each with 16-step resolution 
 
--host mode, where the firmware steps aside and allows an attached device dictate the layout and behavior
+-second midi port for daw/hardware control through MCU/HUI
 
 -generally informative context on the oled
 
--4 banks of the four encoder knobs for each of the main modes you're in, assignable in the menu to whatever you want them to send
+-4 banks of the four encoder knobs for each of the main modes you're in (apart from fader and MCU/HUI/DAW mode), assignable in the menu to whatever you want them to send
 
--button LED/pad lighting
+-universal control surface mode, entered by pressing NOTE twice, provides an initially blank slate that allows easy mapping of each of the fire's 64 pads to whatever midi signal, whatever value, toggle/momentary, up to 8 pages deep with 4 banks of mappable knobs per page
+
+-good-quality, meaningful button LED/pad lighting all around
 
 -send & receive MIDI over USB to anything that is capable of speaking the language
 
@@ -38,10 +40,13 @@ Never came up with a snappy name for this one, but it's exactly what I wanted th
 
 
 A note here about some of the things one might find in addition:
-My personal copy of this firmware gets updated pretty often at this point and some of the features I put in for myself will leak into the public release. For example, pressing the DRUM key twice now goes into MPC mode, which is a map of my MPC1000 face buttons. It's a thing specific to me that I'm leaving until/unless this gets enough outside traction to make it worth removing. Another example is ORC mode, a menu option that brings up a surface specific to the ORC project. Poke around and you will find neat things, such as all the pretty visuals in lights mode.
-Some defaults in here (like displaying the line markers) may be confusing, but everything can be turned off/adjusted in the menu. 
+My personal copy of this firmware gets updated pretty often at this point and some of the features I put in for myself will leak into the public release. For example, pressing the DRUM key twice now goes into MPC mode, which is a map of my MPC1000 face buttons. It's a thing specific to me that I'm leaving until/unless this gets enough outside traction to make it worth removing. Another example is ORC mode, a menu option specific to the ORC project that allows the fire to be taken over and used like a remote control/display. Poke around and you will find neat things, such as paint mode.
 
-The device will show up to other things as ORC. I should probably change this, as it has become only tangentially-related to that larger project.
+A word about the ORC project and its connection to this: while both are standalone projects, the fire was initially decoded on its original firmware and used as a way to interact with the headless ORC. That complete decoding and handler for the original fire firmware is available in my profile here, as are a few other potentially useful resources along these lines.
+
+Some possible defaults in here (displaying the line markers in the seq, for example) may be confusing, but everything can be turned off/adjusted in the menu. 
+
+The device will show up to other things as FLAME. I tried to settle on a more esoteric name but eventually bowed to the immense weight of obviousness.
 
 
 **I am genuinely proud of this and I hope that other people will find this helpful in some way.**
