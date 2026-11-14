@@ -31,6 +31,16 @@ void scr_tracks(const char *const name[4], const uint8_t lv[4][16], const uint8_
 /* Faders: up to 4 rows. used 1 = a fader (cc, val), 0 = the "+ add" row, -1 = empty. */
 typedef struct { int used; int num, cc, val; } scr_fader_t;
 void scr_faders(const scr_fader_t f[4]);
+/* v0.31d the DAW page: the same rows with the host's names (at most SCR_FADER_NAME characters, left of the bar at x 60)
+ * instead of "F1 CC7"; an empty name shows "row <num>". name = 0 is exactly scr_faders. */
+#define SCR_FADER_NAME 8
+void scr_fader_rows(const scr_fader_t f[4], const char *const name[4]);
+
+/* UNIVERSAL (v0.31): the knob bank's 4 rows: a label ("2C CC74 ch3", at most 13 characters), the value as a bar and a
+ * number (used 0 = unassigned: no bar). mark = the row turned last (a bar at its left edge), -1 none. */
+void scr_uni_knobs(const char *const label[4], const int val[4], const int used[4], int mark);
+/* 4 plain text lines in the body (the UNIVERSAL edit screens, an empty page): at most 19 characters each, a longer one is cut. */
+void scr_lines(const char *const line[4]);
 
 /* Per-track volume (the STEP faders): 4 rows, a name, a bar of the 0-127 level, a percentage; muted rows show M. */
 void scr_levels(const char *const name[4], const uint8_t val[4], const uint8_t muted[4]);

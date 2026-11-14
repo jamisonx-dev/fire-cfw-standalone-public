@@ -7,6 +7,8 @@
 !/FIRE_HARDWARE_MAP.md
 !/fw/
 !/installer/
+!/.github/
+!/tools/
 
 # the installer's scripts are tracked; its binaries ship only in the release zip, and backups never leave the PC
 installer/**/*.exe

@@ -1,10 +1,26 @@
-# ORC Fire sequencer: user guide
+# FLAME (Akai Fire custom firmware): user guide
 
 Custom firmware that turns the Akai Fire into a **standalone step sequencer**. It keeps its own time,
-lights itself and sends MIDI notes over USB to whatever it's plugged into (the ORC, a computer, a
-USB host). On USB it appears as **"ORC FW seq"**.
+lights itself and sends MIDI notes over USB to whatever it's plugged into (a computer, a USB host, the
+ORC). Since v0.36 it is called **FLAME** and has **two USB MIDI ports**:
 
-Version described: **v0.29** (2026-10-24: **32 tracks** (T17-T24 added), **CC tracks**, **undo / redo**, the **roller / looper**; sections marked v0.29 below). **v0.21** (2026-10-14 night: ORC surface pads talk to the ORC by SysEx `0C`, no MIDI channel). **v0.20** (2026-10-14: knob banks on KNOB MODE, BROWSER menu pages Playing / Knobs / Display / Shortcuts / ORC surface, beat-mark settings). **v0.19**: ORC surface mode. **v0.18**: idle lights off by default. **v0.17** (2026-10-14: the 2026-10-13 review fixes wired in + host status 07). **v0.15** (2026-10-13; lights, menu, screens, PI VU and the heat looks were played and liked by the owner the same evening; the crash recorder came the same night). ("v0.16" is skipped: that name went to the parked HOST-mode firmware on branch `host-mode`.) v0.14 was (2026-10-07). Played and confirmed by the owner up to v0.11 ("This is awesome");
+| Port | Linux / macOS name | Windows 10 name | What it is |
+|---|---|---|---|
+| 1 | `FLAME seq` | `FLAME` | the sequencer: its notes, CCs and clock, MIDI clock in, the host protocol (below). Up to v0.35b this was the only port, named `ORC FW seq`. |
+| 2 | `FLAME DAW` | `MIDIIN2 (FLAME)` / `MIDIOUT2 (FLAME)` | **DAW mode** only: Mackie Control / HUI for a DAW (below). Nothing else uses it. |
+
+(The Windows names come from Windows itself, which names a device's extra ports this way. Newer Windows MIDI may show
+the Linux names.)
+
+**What needs what.** Everything in this guide works with just the Fire and whatever it plays, except three things that
+only do something with the ORC, the owner's Raspberry Pi rig: **ORC mode**, **the DAW page** (PERFORM twice) and the
+host commands the Pi sends. Without the ORC they stay out of the way.
+
+Version described: **v0.39** (2026-11: **FLAME** with two USB ports (v0.36), **DAW mode** = Mackie Control / HUI on its
+own port (v0.36), **PAINT mode** (v0.37), **BROWSER > About** with the version and the crash on record (v0.35), one
+second view per mode button (v0.38: STEP x2 track levels, NOTE x2 UNIVERSAL, DRUM x2 the MPC remote, PERFORM x2 the
+DAW page). **Removed in v0.36** to make room for DAW mode: the Pi VU bars and the ORC pads page; the light shows went
+in v0.31r). Older history: **v0.29** (2026-10-24: **32 tracks** (T17-T24 added), **CC tracks**, **undo / redo**, the **roller / looper**; sections marked v0.29 below). **v0.21** (2026-10-14 night: ORC surface pads talk to the ORC by SysEx `0C`, no MIDI channel). **v0.20** (2026-10-14: knob banks on KNOB MODE, BROWSER menu pages Playing / Knobs / Display / Shortcuts / ORC surface, beat-mark settings). **v0.19**: ORC surface mode. **v0.18**: idle lights off by default. **v0.17** (2026-10-14: the 2026-10-13 review fixes wired in + host status 07). **v0.15** (2026-10-13; lights, menu, screens, PI VU and the heat looks were played and liked by the owner the same evening; the crash recorder came the same night). ("v0.16" is skipped: that name went to the parked HOST-mode firmware on branch `host-mode`.) v0.14 was (2026-10-07). Played and confirmed by the owner up to v0.11 ("This is awesome");
 v0.12 is a round of fixes from a code review (see the end of this guide).
 
 ## The layout
@@ -299,6 +315,175 @@ Each fader sends one CC on one channel.
 The first time, there are 16 faders: CC 7 (volume) on channels 1-16. Fader levels are kept with the
 next save (moving a fader doesn't start one by itself); adding, removing and setting up faders save.
 
+**Faders follow the host (v0.31c):** a Control Change sent TO the Fire over USB (from the Pi, e.g. REAPER's faders through a
+bridge) on channel C, CC N sets every fader set up as channel C / CC N to that value, in any mode (the pads show it when
+FADERS is on screen). Nothing is sent back and it starts no save (the level rides along with the next one, like a fader you move).
+
+## The DAW page (v0.31d)
+
+**Needs the ORC** (its `orc1-dawsurf` bridges REAPER to it). Not to be confused with **DAW mode** (below), which needs
+no Pi. A second set of faders that the **host** (the Pi, e.g. bridging REAPER as a Mackie Control surface) defines: up to
+**9 rows** (8 tracks + the master), each with the DAW's own track colour, its name (up to 8 characters) and its level.
+You don't set anything up: the rows appear when the host sends them, and they are **never saved** on the Fire (RAM only:
+after a power-on there is no DAW page until the host sends it again).
+
+**Getting there (v0.38):** tap PERFORM: FADERS, **again: the DAW page** (only while the host has defined one; without it
+the second tap goes back), again: back to where you were. Each mode button has one second view (STEP: track levels, NOTE:
+UNIVERSAL, DRUM: the MPC remote, PERFORM: the DAW page), and its light blinks while it is up. STEP / NOTE / DRUM leave it too. If the
+host removes the page while it is on screen, the Fire goes back to where you were before FADERS.
+
+It plays **exactly like FADERS** (the same code):
+
+| Do | Gets |
+|---|---|
+| Tap a column | jump to that level (left = 0, right = 127) |
+| Knobs 1-4 | fine-tune the 4 visible rows (knob 1 = top row) |
+| SELECT turn / SHIFT + PATTERN | scroll rows one / four at a time; **pushing past the first or last row asks the host for the previous / next bank** (1E), e.g. REAPER's tracks 9-16 |
+| Row buttons | nothing (the host owns the rows: no add / remove / set-up) |
+
+Each row lights in the DAW's colour up to its level (bright up to the level, the pad AT the level dim, dark above; a
+track with no colour shows white). The screen shows `name [bar] value`; a row the host sent no name for shows `row N`.
+A level you move is sent to the host (1D) once per change, exactly when FADERS would send its CC; a level the host sends
+(the DAW's fader moved) only moves the row, nothing is sent back. FADERS' "follow the host CCs" (above) never touches the
+DAW page.
+
+## DAW mode (v0.36): the Fire as a Mackie Control / HUI surface
+
+Plug the Fire into a computer and it can drive a DAW the way a Mackie Control (MCU) or HUI controller does: faders,
+mute / solo / record-arm / select, the transport, banking, the knobs as V-pots. No Pi, no driver. It talks on the
+Fire's **second USB port** (`FLAME DAW`; on Windows 10 `MIDIIN2 (FLAME)` / `MIDIOUT2 (FLAME)`), so the sequencer on the
+first port is not touched and keeps playing underneath.
+
+**In the DAW:** add a Mackie Control (or HUI) control surface and give it the FLAME DAW port as both its input and its
+output. Most DAWs open their MIDI ports only when they start, so plug the Fire in first.
+
+**On the Fire:**
+- **BROWSER > DAW protocol**: **auto** (the default: it waits and follows whichever protocol the DAW speaks first),
+  **MCU** or **HUI**. Saved.
+- **BROWSER > MCU/HUI/DAW** starts DAW mode (it says `no computer` when the Fire is not plugged into one). **SHIFT +
+  BROWSER** leaves, as in ORC mode; the screen says `DAW off`.
+- The screen's top line says `DAW auto` / `DAW MCU` / `DAW HUI`, with `waiting` until the DAW has said anything. Below:
+  the 8 track names (the DAW's, else 1-8), the DAW's time display, and which knobs are which.
+- What the DAW has sent is kept while you are out of DAW mode (the port is listened to from power-on), so going back
+  in shows the DAW's current names and levels.
+
+Two views; **PERFORM** = the fader view (it opens there), **STEP** = the button view (the lit button shows which):
+
+| Fader view (PERFORM) | Does |
+|---|---|
+| Pads | 4 rows = 4 of the DAW's tracks (8 + Master with MCU, 8 with HUI); tap a column to set that track's fader (left = bottom). Plays exactly like FADERS. |
+| Knobs 1-4 | fine-move the 4 visible faders |
+| SELECT turn | scroll the rows; past the first / last one the DAW moves one track |
+| Row buttons | that track's MUTE |
+
+| Button view (STEP) | Does |
+|---|---|
+| Pads, top row to bottom | **REC** (red), **SOLO** (yellow), **MUTE** (orange), **SELECT** (white) for 8 tracks, 2 pads per track. Lit = on in the DAW, dim = off. |
+| Knobs 1-4 | the V-pots of tracks 1-4; **push SELECT** for tracks 5-8 (the screen says which) |
+| SELECT turn | the jog wheel |
+
+| Either view | Does |
+|---|---|
+| PLAY / STOP / REC | the DAW's transport; their lights show the DAW's |
+| PATTERN up / down | bank: the previous / next 8 tracks |
+| GRID left / right | move one track left / right |
+
+A fader you move is "touched" while you move it and let go half a second after you stop, so the DAW's automation
+behaves.
+
+**Tested:** MCU with REAPER on a Windows PC (the owner, on v0.36). **Not tested yet:** HUI with Pro Tools (or any HUI
+host), Logic, Ableton, Cubase, Bitwig, FL Studio. The protocol bytes come from public documentation and other people's
+work, not from a real HUI host: if your DAW does something odd, please report it (see the README). Meters are not shown.
+
+## ORC mode (v0.33): the ORC takes the whole Fire
+
+**Needs the ORC** (the owner's Raspberry Pi rig); with nothing answering it gives up after 5 seconds.
+
+
+**BROWSER > ORC mode** hands the Fire to the ORC: the pads, every button, the four knobs, SELECT and the
+screen are the ORC's (its own sequencer view, chord rows, keyboards, FX, faders: whatever the ORC's Fire
+handler shows). **The Fire's own sequencer keeps playing underneath**, on its own clock or the external one;
+you just cannot see or edit it until you come back.
+
+- **Back to the sequencer: SHIFT + BROWSER.** It is the one combination the ORC never sees.
+- The Fire also comes back **by itself** if the ORC stops answering for 5 seconds (unplugged, the ORC
+  restarting): the status line says `ORC gone`. With no ORC listening, ORC mode shows `waiting for the ORC`
+  and gives up after those 5 seconds.
+- Entering lets go of anything held (live notes, a roll, latched UNIVERSAL pads), so nothing hangs.
+- Nothing is saved or changed by ORC mode; it is off at power-on.
+- The older, smaller **ORC pads** page (only the pads went to the ORC's `/pads` layout) was removed in v0.36.
+
+### Brightness: 22 steps instead of 8 (v0.33)
+Every light used to have 8 brightness steps; the ORC's colours looked washed out on them. Now there are 22.
+The sequencer's own lights use the same 8 as before (each is exactly the same brightness: step k of 7 = fine
+level 3 x k of 21), and ORC mode's colours use all 22 through a curve (`24`, below; 2.0 at power-on) so dim
+colours stay dim and distinct. How it is done: a light is switched on in k of every 21 chain refreshes, spread
+evenly, instead of k of 7. **The chain interrupt's timing and its button scan are unchanged** (still one pass
+every 500 us): the 2026-10-13 attempt at finer brightness changed both and broke SHIFT + pad; this does not
+touch them. The slowest blink, on the very dimmest step only, is 95 times a second.
+
+## PAINT mode (v0.37): paint the pads
+
+A very simple paint box, for kids and for art. **BROWSER > Paint** to start (no computer needed); **SHIFT + BROWSER**
+goes back to the sequencer, which keeps playing underneath the whole time.
+
+- **Tap a pad** to paint it the picked colour. Tap it again (same colour) to wipe it back to black.
+- **Hold SHIFT** and the pads show the palette: 16 colours as big 2 x 2 blocks, red at the top left, the eraser (dim
+  grey) at the bottom right. The picked one is the brightest. Tap a block to pick it, let go of SHIFT and paint.
+- **The four MUTE row buttons are four saved paintings.** Tap one to load it; **hold one for a second** to save the
+  canvas into it. A saved slot's button is lit green, an empty one dim. The screen says what happened.
+- **SHIFT + STOP** clears the canvas (saved paintings are not touched).
+
+The canvas stays until the Fire loses power; saved paintings are kept in flash (32 bytes each, save kinds 57-60) and
+survive the save area's clean-up. The colours go through ORC mode's brightness curve. The knobs do nothing here.
+
+## UNIVERSAL mode (v0.31)
+
+**Tap NOTE on the keyboard** (so: tap NOTE twice; v0.38, it was PERFORM twice) for UNIVERSAL: the Fire as a general MIDI
+controller. NOTE again goes back to the keyboard; STEP / DRUM / PERFORM leave it too. NOTE's yellow light blinks.
+The sequencer keeps running underneath. Everything is **stored on the Fire**, so it works with no Pi (e.g. through the
+Kenton USB host). The ORC's web page sets pages up (host commands 10-15); the Fire can edit them too.
+
+- **8 pages**, GRID < > (the screen shows `Univ P3/8` and the page's name). A page never set up is empty: nothing
+  plays, nothing starts by itself.
+- **Pads:** each of the 64 can be a note, a note latch, a CC hold (on value, off value on release), a CC toggle, a CC
+  press (on value only) or a program change, on any channel, in a colour. Dim = idle, bright = held or latched on.
+  A pad can have a **second assignment played while SHIFT is held** (no second assignment: SHIFT plays the first).
+- **Knobs:** 4 banks of 4 per page, KNOB MODE steps the bank (CHANNEL / MIXER / USER 1 / USER 2 lights). A knob sends
+  a CC or pitch bend; it remembers its value (absolute, 0-127; pitch bend 64 = centre). The screen shows the bank's 4
+  knobs with their values; the one turned last is marked.
+- **Not saved:** knob values and latch / toggle states start fresh at power-on (each knob at its start value).
+- **Latched notes** always end with exactly the note they started, and they end by themselves when the page changes,
+  when you leave UNIVERSAL, when that pad is edited / cleared / copied onto, and when the ORC rewrites the page. Up to
+  16 notes can be latched at once (a 17th says `16 latched` and plays nothing). CC toggles keep their state per page
+  (nothing hangs on a CC), but start off again when the ORC rewrites the page.
+- Row buttons do nothing here.
+
+**Editing on the Fire** (hold ALT; the web page is the main way, this is for quick changes):
+
+| Do | Gets |
+|---|---|
+| ALT + tap a pad | edit that pad (it blinks white) and hear it: it plays what it does now. With SHIFT also held: its SHIFT assignment |
+| ... knobs 1-4 | 1 type, 2 channel, 3 number (note / CC / program), 4 on value (velocity for notes) |
+| ... KNOB MODE | knob page 2: 1 off value, 2 colour (CHANNEL / MIXER light = page 1 / 2) |
+| ... knob 1 to "off" | clear the pad (that layer) |
+| ALT + tap it again | play it again with its new settings |
+| ALT + hold pad A, tap pad B | copy A to B (the layer A was picked on) |
+| ALT + turn a knob | edit that knob (the first turn picks it): 1 type (none / CC / pitch bend), 2 channel, 3 CC, 4 start value |
+| let ALT go | done. Saved like any edit: 3 s later (AUTOSAVE off: SAVE NOW). Up to 8 edits wait at a time |
+
+**Edits made here vs. the ORC.** The page the ORC writes wins: if it rewrites (or clears) a page that has edits made on
+the Fire and not saved yet, those edits are dropped and the screen says `edits replaced`. And if unsaved edits can no
+longer fit the budget when it is time to save them (only possible when the ORC made other pages bigger meanwhile),
+they are dropped and the screen says `edits dropped`; they never stay waiting with no way to save them. While the ORC
+writes a page, its new size is already counted, so an edit here that would not fit says `pages full` at once.
+
+**Why a budget.** The pages live only in flash (RAM has no room for them). When the save area fills up it is erased
+and rewritten (only while stopped); for that moment the pages have to sit in RAM, in the undo buffers and the MIDI
+batch buffer. So all 8 pages together are kept within 4096 bytes (`14` reports it; the Fire refuses an edit with
+"pages full"). A page's size = 9 + 6 per assigned pad / layer / knob. A clean-up drops the undo history if any page
+exists. Rolling back to a firmware older than v0.31 keeps the pages until its first clean-up, then they are gone.
+
 ## The screen
 
 (v0.15 redesign: the screen is mostly pictures now.)
@@ -337,7 +522,7 @@ Moving around (switching patterns, muting, changing octave or the keyboard's tra
 **playing live** (tempo, swing, clock out, hits you record with REC) don't start a save by
 themselves (v0.15): they're remembered and written with the next real change, and **when you press
 STOP** if anything is waiting. **While stopped** (v0.17), such a change (a tempo set before pressing PLAY,
-a light show picked with STOP / SELECT, the light speed) is saved **20 seconds after the last one**, so
+a bar look picked in the menu) is saved **20 seconds after the last one**, so
 it can't be lost to unplugging; the `*` shows until then. Editing steps, step settings, song, track notes / channels, colours and
 fader setup still saves 3 seconds after the last change.
 
@@ -352,83 +537,98 @@ ever full, the screen shows **FULL** and the new step isn't added (nothing else 
 count at the larger of their current and their last saved size, so whatever is saved always fits back
 in after a power cut.
 
-## v0.15: the BROWSER menu, light shows, the host protocol (2026-10-13)
+## The BROWSER menu, the host protocol (v0.15, 2026-10-13; updated for v0.39)
 
 ### The BROWSER menu
 Press **BROWSER** (it lights). **SELECT** turns to move, **pushing SELECT** opens an item to change
 (turn) and confirms; BROWSER backs out. PLAY / STOP still work.
 
-The top page has **Autosave**, **Save now**, **ORC mode** (back to the ORC's pad layout after a mode button
-left it; only once the ORC has set one up since power-on), **Playing >**, **Knobs >**, **Display >**, **Lights >**
-and **Shortcuts >** (v0.20). Pushing SELECT on **Lights >** opens the
-page `LIGHTS`; BROWSER goes back up one page (landing on the row you came from), and closes the
-menu from the top page.
+The top page, in order: **Autosave**, **Save now**, **ORC mode**, **MCU/HUI/DAW**, **Paint**, **DAW protocol**,
+**Playing >**, **Knobs >**, **Display >**, **Memory >**, **Shortcuts >**, **About >**. Pushing SELECT on an item with
+`>` opens its page; BROWSER goes back up one page (landing on the row you came from), and closes the menu from the
+top page.
 
 | Item | What it does |
 |---|---|
 | **Autosave** | ON / OFF (see Saving). |
-| **ORC mode** | the ORC's pad layout again (see the ORC's `/pads`). |
-| **Playing >** | **Tempo** (SHIFT = steps of 10), **Swing**, **Clock out** on / off: the same values SHIFT + SELECT, knob 1 and SHIFT + PLAY change. **Pad release** (v0.28; off / 10 / 20 / 30 / 40 / 60 ms, default 20): how long a pad you play live (NOTE, DRUM, MPC pads, the ORC surface) must stay up before its release counts. A pad that flickers as you land on it or roll off it no longer plays a second hit; back down sooner = the same hit. The press itself is never delayed. Raise it if hits still double, lower it for very fast repeats on one pad. |
+| **ORC mode** | v0.33, **needs the ORC**: the ORC takes the pads, buttons, knobs, SELECT and screen; the sequencer keeps playing. SHIFT + BROWSER comes back. |
+| **MCU/HUI/DAW** | v0.36: **DAW mode**, the Fire as a Mackie Control / HUI surface for a computer (see "DAW mode"). SHIFT + BROWSER comes back. |
+| **Paint** | v0.37: **PAINT mode** (see "PAINT mode"). SHIFT + BROWSER comes back. |
+| **DAW protocol** | v0.36: auto / MCU / HUI, for DAW mode. Saved. |
+| **Playing >** | **Tempo** (SHIFT = steps of 10), **Swing**, **Clock out** on / off: the same values SHIFT + SELECT, knob 1 and SHIFT + PLAY change. **Pad release** (v0.28; off / 10 / 20 / 30 / 40 / 60 ms, default 20): how long a pad you play live (NOTE, DRUM, the MPC remote) must stay up before its release counts. A pad that flickers as you land on it or roll off it no longer plays a second hit; back down sooner = the same hit. The press itself is never delayed. Raise it if hits still double, lower it for very fast repeats on one pad. |
 | **Knobs >** | **Section** (v0.29: step / note / drum / MPC; it opens on the one the pads are in), **Bank** (that section's current one; same as KNOB MODE), **Knob** 1-4 to set up, then what it **Sends** (swing, tempo, CC 1-127; SHIFT = steps of 10), its **Channel**, its **Mode** (relative / absolute). |
 | **Display >** | **Beat marks** on / off, their **Colour** (blue, white, red, green, yellow, purple, cyan) and **Spacing**: every beat (4 steps), every bar (16), or beat+bar (the bar mark brighter). They use the pads' lowest brightness. |
+| **About >** (v0.35) | Read-only, for bug reports (take a photo of it): **Version** (the release, e.g. v0.35b), **Build** (the build id, the same as `ORCBUILD` in the image), then the crash on record: **Crash** (none, HardFault, watchdog, TIM4 slip ...), **In** (what the Fire was doing: screen, buttons, saving ...), **PC** / **LR** (the two addresses that, with the build, say where in the code; v0.35b: these six fill the first screen, so one photo is a whole report), **Crashes** (how many since the record was last cleared), **Uptime** (how long it had run when it crashed), and **Misreads** (the TIM4 one-bit misread counter, live). The record is the one read at power-on; host `06 01` clears it. |
 | **Memory >** (v0.26) | Read-only: **Drum steps left**, **Note steps left** and **Memory used**: how many more lit steps still fit in the pool all 32 patterns share before the screen says FULL (a drum step takes 3 bytes, a melodic step 6; a pattern counts as the larger of what it holds now and what is saved). |
 | **Shortcuts >** | read-only cheat sheets: Steps, Hold a step, Hold a row, Patterns, Song editor, Playing, Note mode, Drum mode, Faders, Knobs. SELECT scrolls, BROWSER goes back. |
 | **Save now** | writes anything waiting; says `saving...` or `nothing new`. |
-| **Lights >** | opens the lights page: |
-| | **Start lights**: the pads become a light show. |
-| | **Show**: PLASMA, SPARKLE, SWEEP, FLAME, BEAT, SPARSE, RAIN, RIPPLE, COMET, SCANNER, WAVE, TRACKS, **PI VU** (the Pi's audio levels while the Pi sends them; 3 s with none and the pads show SPARKLE instead, and the bars come back as soon as the Pi sends again; v0.17), **TEXT** (a message scrolls across the pads: HELLO until the Pi sends another with `host_text.py`) or CYCLE (a new time-driven show every 20 s). Turning it while lights run switches at once. |
-| | **Speed**: x0.25 .. x4 (SHIFT = fine steps). |
-| | **Idle start**: off / 15 s / 30 s / 1 m / 2 m / 5 m with the sequencer stopped and nothing touched. **Default OFF since v0.18** (the owner never wanted a screen saver; v0.18 also switches an existing save to off once). Start the lights by hand: BROWSER > Lights > Start lights. The time counts from when playing stops (also an external clock's STOP) and from when the pads last went back to the steps; nothing held (a step, a row, a live pad, PATTERN, SHIFT, ALT), not in the song editor or with REC armed (v0.17). |
-| | **Smooth**: on = in-between brightness by a fixed per-pad dither (the pads only have 8 levels; it never flickers); off = plain. |
-| | **Bar look**: how the VU bars (TRACKS, PI VU) look: **snappy** (a level goes straight to the bar, the bar falls in a steady line, the top pad partly lit; the default), **smooth** (the bar follows the level, the peak dot holds before it falls) **whole** (smooth, but only whole pads, never a half-lit one), **heat** (a heat-sensitive sheet: a pad's colour is how deep inside the bar it is, so the base is hot red and the tip cools through orange, yellow, green, cyan, blue and purple to black; snappy movement) or **heat smooth** (the same colours, smooth movement). |
 
-### Light shows
-The ORC's eleven time-driven shows, ported exactly (the code is checked against the ORC's Python, every pad): PLASMA,
-**SPARKLE**, SWEEP, FLAME, BEAT, SPARSE, RAIN, RIPPLE, COMET, SCANNER, WAVE (the ORC's twelfth, a made-up time-driven VU, was removed: TRACKS and PI VU are the real ones; its number 11 stays a hole). Pace and tempo
-lock are the ORC's (they follow the BPM). Plus **TRACKS**: VU bars that jump with the sequencer's own
-hits (column = track, accents tallest) and fall by themselves. The bars' look is a menu setting (Bar look).
+**Gone:** the light shows (v0.31r: PLASMA, SPARKLE ... WAVE, TRACKS, the scrolling text, CYCLE, the light speed, Idle
+start), then the **Pi VU** bars and the **ORC pads** page (v0.36, to make room for DAW mode). The saved settings keep
+their layout (the old bytes are simply unused), so nothing in the save area changes meaning.
 
-- Start: menu **Start lights**, the idle time, or the host. SPARKLE is the default show.
-- While they run: **SELECT** = next / previous show, **knob 1** = speed, **STOP** = next show (when
-  stopped), **BROWSER** = the menu. **The first touch of any pad or button only ends them** (it is
-  not also an edit). Idle lights also end when playback starts; lights you started by hand keep
-  running while it plays, also under an external clock (v0.17; they used to freeze).
-- A frame is drawn two columns at a time and only when the next step, ratchet or note-off isn't
-  about to be due (the rule a save follows), then shown all at once. Under an external clock the
-  next step is predicted from the clock's step length.
-- TRACKS / PI VU bars start empty each time the lights start, and when the Bar look changes.
-
-### The host protocol (the Pi -> the Fire)
-SysEx, id `7D` (non-commercial), then `ORC` (`4F 52 43`) and a command:
+### The host protocol (a computer or the Pi -> the Fire)
+SysEx on the **first** port (`FLAME seq`), id `7D` (non-commercial), then `ORC` (`4F 52 43`) and a command. Most of it
+is for the ORC; `00`, `06`, `07` and `08` are useful to anyone (the crash readout for bug reports uses `06` / `08`).
 
 | Command | Data | Meaning |
 |---|---|---|
-| `00` | | hello: the Fire replies `F0 7D 4F 52 43 00 01 F7` (version 1) |
-| `01` | 16 x 0-127 | VU column levels, left to right; bars jump up, fall alone, so send raw levels ~30/s |
-| `02` | `0` / `1` | host lights on (VU bars take the pads; a touch ends them and the host must ask again; they also end 3 s after the last levels frame) / off: ends the host bars or any show the host started with 02 / 04 / 05 (v0.17) |
-| `03` | 0-127 | light speed (64 = x1), saved like the menu setting |
-| `04` | 0-12 (not 11) | show that effect (like Start lights); the saved setting isn't changed. It stays (CYCLE and PI VU levels leave it alone) until a touch, SELECT/STOP or `02 00` (v0.17) |
-| `05` | up to 32 ASCII characters | scroll that message across the pads (3x4 font: capitals, digits, `! ? . , - : ' + / = * #`, and `~` is a heart; lower case shows as capitals). The first thing on screen is the message coming in from the right edge. Stays like `04`. An empty message is ignored. |
-| `06` | optional `01` | the last crash on record: the Fire answers with a 61-byte record, version 2 (cause, main-loop stage, PC, LR, status registers, uptime, build id, SP, stack low point; see `crash.h`, decode with `host_crash.py`; version 1 = 46 bytes, no build/stack); `06 01` also clears it |
-| `07` | | status (read only, v0.17): the Fire answers `F0 7D 4F 52 43 07` + 16 bytes: lights on, showing (mode, 127 = none), host bars, host-started, pinned, unsaved (`*`), lazy save armed, settings saves since boot (mod 128), playing, external play, Show setting, speed, menu open, frames drawn (mod 128), and the deepest stack use since boot in bytes (2 bytes, high 7 bits first). `fire_live_test.py` uses it. |
+| `00` | | hello: the Fire replies `F0 7D 4F 52 43 00 <version> F7` (the version list is under this table) |
+| `01` `02` | | **gone since v0.36** (the Pi VU levels and on / off): ignored |
+| `03` `04` `05` | | **gone since v0.31r** (light speed, a show, scrolling text): ignored like any unknown command |
+| `06` | optional `01` | the last crash on record: the Fire answers with a 91-byte record, version 3 (cause, main-loop stage, PC, LR, status registers, uptime, build id, SP, stack low point, the TIM4 check's note; see `crash.h`, decode with `host_crash.py`; version 2 = 61 bytes without the TIM4 note, version 1 = 46 bytes, no build/stack); `06 01` also clears it |
+| `07` | | status (read only, v0.17): the Fire answers `F0 7D 4F 52 43 07` + 16 bytes: lights on, showing (mode, 127 = none; since v0.31r always 13 = the bars when on), host bars, host-started, pinned (always 0 since v0.31r), unsaved (`*`), lazy save armed, settings saves since boot (mod 128), playing, external play, Show setting + speed (the saved bytes, unused since v0.31r), menu open, frames drawn (mod 128), and the deepest stack use since boot in bytes (2 bytes, high 7 bits first); since v0.19 the surface on + its channel; **since v0.31 the longest main-loop pass in microseconds** (2 bytes, high 7 bits first, 16383 = that or more; a clean-up while stopped takes ~1-2 s and shows as 16383): `07 01` answers the same and then starts the measurement over. `fire_live_test.py` uses it. |
 | `08` | | the stack around the last fault (read only, v0.17c): `F0 7D 4F 52 43 08 01 <valid> <base: 5 bytes> <64 words x 5 bytes> F7` (332 bytes of data). Decode with `host_crash.py`. |
-| `0A` | first pad, count 1-10, then R G B (0-7) per pad | the ORC SURFACE's pad colours (v0.19); kept while the surface is hidden |
-| `0B` | `01 <x>` / `00` | show the ORC surface / leave it (v0.19). The second byte was the surface's MIDI channel up to v0.20; since v0.21 it is accepted and ignored. The ORC sends `01 <x>` then `00` when the Fire appears, so the Fire learns there is a surface but stays on its steps; BROWSER > ORC surface (or `/pads` SHOW ON FIRE) shows it. |
-| `0C` | **Fire -> ORC** (v0.21): `<pad 0-63> <velocity>` | a surface pad press (velocity 1-127) or release (0). The surface uses **no MIDI channel**, so the sequencer keeps all 16 (before v0.21 a surface pad was a note on the `0B` channel). |
+| `09` | `<address: 5 bytes>` | read one 32-bit word (v0.17d, for debugging): answered `F0 7D 4F 52 43 09 <the address as sent> <value: 5 bytes> 00 F7`. An address that isn't RAM, flash or a register faults (the Fire restarts with a crash record). |
+| `0A` `0B` | | **gone since v0.36** (the ORC pads page's colours and on / off): ignored. `0C` (its pad presses, Fire -> ORC) is never sent. |
+| `0D` | `<n 0-31>` | **queue a pattern** (v0.30, for the ORC's scenes): exactly what PATTERN up / down and the pattern picker do. Playing (own or external clock): pattern n starts at the next bar (the PATTERN light blinks, the screen shows `>n`); n = the pattern already playing clears the queue. Stopped: it switches at once. **Song mode:** n is a song SLOT (0 = the first), the song jumps there at the bar; a slot past the song's end is refused. The Fire answers `F0 7D 4F 52 43 0D <ok 0/1> <current pattern 0-31> <queued: pattern or slot, 127 = none> <song 0/1> F7`. |
+| `0E` | `0` / `1` | **bar messages** off / on (v0.30). Off at power-on: nothing is sent until the host asks. |
+| `0F` | **Fire -> ORC** (v0.30, while `0E 01`): `<pattern 0-31> <song slot, 127 = no song> <bar 0-127>` | a bar starts (step 0, 16, 32 ... while playing, own clock or external): sent right after that step's notes, the pattern = the one now playing (after a queued switch). The bar count runs from the start (0) and wraps at 128; a CONTINUE mid-bar sends nothing until the next bar. |
+
+| `10` | `<page 0-7> <len hi> <len lo>` | **UNIVERSAL page write, begin** (v0.31). `len` = the page's size in bytes (9 + 6 x entries, 9-873; 14 bits, high 7 first). Answer: `F0 7D 4F 52 43 10 <result> <page> <done hi> <done lo> F7` (all writes answer in this shape; done = bytes in flash so far). A begin during an unfinished write restarts it (the old one never counts). |
+| `11` | `<offset hi> <offset lo> <1-24 bytes>` | the next chunk: offset = the bytes sent so far (chunks go in order), 24 bytes each except the last. Answered (`11 <result> ...`) once the chunk is IN FLASH: send the next one after the answer. |
+| `12` | `<sum hi> <sum lo>` | commit: sum = every byte of the page added up, 14 bits. The Fire checks the page in flash (sum + every field, see below) and only then makes it count; answered `12 0 ...` when it does. A wrong sum / bad page: answered 4 / 5, the page never counts, the old one stays. |
+| `13` | `<page> <offset hi> <offset lo>` | read a page AS THE FIRE PLAYS IT (edits made on the Fire not saved yet included): `F0 7D 4F 52 43 13 <result> <page> <len hi> <len lo> <offset hi> <offset lo> <up to 24 bytes> F7`. A page never written reads as the 9-byte empty page. |
+| `14` | | the page list: `F0 7D 4F 52 43 14 <8 pages> <budget hi> <budget lo> <used hi> <used lo> <page being written, 127 = none> <current page> <UNIVERSAL showing 0/1>` then for each page 0-7: `<len hi> <len lo> <sum hi> <sum lo> <name: 8 bytes>`, `F7`. |
+| `15` | `<page>` | clear a page (write the empty page); answered `15 <result> ...` when it counts. |
+| `1A` | `<n 0-9>` | **the DAW page** (v0.31d) has n rows (0 = no page; it leaves the screen if it was showing). Rows from n on are cleared; rows below n are kept. n > 9 is ignored. No answer. RAM only. |
+| `1B` | `<row 0-8> <R> <G> <B> <level hi> <level lo> <name: 0-8 bytes>` | one DAW row in full: colour (0-127 per channel, e.g. REAPER's track colour; shown scaled so the brightest channel is full, black = white), a 14-bit level (v0.31f; hi = the top 7 bits; the pads show the top 7), a name (cut to 8, non-ASCII = `?`). Never sent back. No answer. |
+| `1C` | `<row 0-8> <level hi> <level lo>` | one DAW row's 14-bit level only (v0.31f; a DAW fader moved). Never sent back. No answer. |
+| `1D` | **Fire -> host** (v0.31f): `<row> <level hi> <level lo>` | the user moved a DAW row on the Fire, once per change. A pad tap jumps to its column's level exactly as in FADERS; a knob moves the full 14-bit level with acceleration (a slow click = 1 of 16383, quicker turns 8 / 32 / 128). Never for a level the host set. |
+| `1E` | **Fire -> host** (v0.31f): `<0|1> <count 1-127>` | SELECT turned on the DAW page (`00` = back / up, `01` = on / down; count = detents, SHIFT + PATTERN = 4). The page never scrolls itself: the host moves its list (the Pi: one REAPER track per detent, the tracks then MASTER). |
+| `20` | `<sub> ...` | **remote input** (v0.31r, for troubleshooting: `fire_press.py` plays the Fire from the Pi). `20 00 01` arms it (and keeps it alive), `20 00 00` disarms (every input it holds is released); `20 01 <input 0-87> <1 press / 0 release>` (the input numbers of `fire_map.h`: pads 0-63, buttons 64-87); `20 02 <0-3 knob, 4 SELECT> <1 clockwise / 0 back> <detents 1-127>`; `20 03` releases everything it holds. Every one is answered `F0 7D 4F 52 43 20 <sub> <result: 0 ok, 1 not armed, 2 bad, 3 full> <armed 0/1> F7`. **Off at power-on**; armed, it ends by itself 5 s after the last `20` (a dead script can't leave SHIFT held). The presses and turns go through exactly the code real ones do (SHIFT held from the Pi lights SHIFT and makes a pad an accent); only the button scan itself is skipped. At most 7 inputs can be held from the host at once. |
+| `21` | `0` / `1` / `2` | **ORC mode** (v0.33) off / on / "still here". Always answered `F0 7D 4F 52 43 21 <0|1> F7` (the state now); the Fire sends the same frame by itself whenever the state changes (the menu, SHIFT + BROWSER, the 5 s quiet timeout). While on, the host must send any `21` at least every 5 s. |
+| `22` | **Fire -> host** (v0.33, ORC mode): `<note> <vel>` | a pad (notes 54-117, 54 = top left, velocity 100) or a button (Akai's note numbers: STEP 44 .. REC 53, PATTERN 31 / 32, BROWSER 33, GRID 34 / 35, SELECT push 25, KNOB MODE 26, the row buttons 36-39; velocity 127) pressed, or let go (velocity 0). SysEx and not notes, because the sequencer's own notes leave on the same port. |
+| `23` | **Fire -> host** (v0.33, ORC mode): `<k> <rel>` | knob k (0-3) or SELECT (4) turned: 1..63 = that many detents up, 127..65 = down. |
+| `24` | `<10-30>` | the ORC-mode pad colour curve x 10 (v0.33): 10 = straight, 20 = squared (power-on), 30 = cubed. Not saved; applies to colours sent after it. No answer. |
+| `25` | `<12-64>` / `00` | ORC mode's short LED slot (v0.34): sets the share its colours are split by; `25 00` only asks. Answered `F0 7D 4F 52 43 25 <share> <measured slot, us> <interrupt time, us> F7`. |
+| Akai `65` / `0E` | as Akai's firmware takes them | **only in ORC mode** (v0.33): `F0 47 7F 43 65 <len hi> <len lo> {pad, R, G, B}... F7` pad colours (0-127 each), `F0 47 7F 43 0E <len hi> <len lo> <band0> <band1> <col0> <col1> <bits> F7` a screen bitmap (Akai's 7-bit packing, any window). Any length (they do not go through the 40-byte command buffer). Ignored outside ORC mode. |
+
+Host values in `1A`-`1C` above 127 are clamped (a correct 7-bit frame never has them); a whole frame longer than 40 bytes is dropped, as for every command.
+
+**Results:** 0 OK, 1 bad arguments, 2 busy (another write or a save is running: retry in ~50 ms), 3 out of order (no write begun, a wrong offset, a commit before the last chunk), 4 wrong sum, 5 bad page, 6 full (all pages together over the budget), 7 no room while playing (the save area needs its clean-up: stop the Fire and retry), 8 a flash write failed. A write with no chunk / commit for 3 s is dropped.
+
+**The page format** (every byte 7-bit, exactly what is stored): `[0]` version 1, `[1-8]` name (ASCII 32-126, spaces = none), then entries of 6 bytes, in any order, one per pad + layer and one per knob:
+- pad: `<pad 0-63> <layer (0 base, 1 SHIFT) + colour x 2 (0-15 the fader colours, 16 grey)> <type x 16 + channel 0-15> <number> <on value> <off value>`. Types: 1 note (velocity = on value; off on release), 2 note latch (on / off on alternate presses), 3 CC hold (on value, off value on release), 4 CC toggle (on value / off value on alternate presses), 5 CC press (on value on press only: the old /control CC), 6 program change (number).
+- knob: `<64 + slot 0-15 (bank x 4 + knob)> <type 1 CC / 2 pitch bend> <channel 0-15> <CC> <start value> <0>`.
+
+A pad or knob with no entry does nothing; pads are numbered `row x 16 + column` from the top left. The budget (all 8 pages together) is 4096 bytes: 8 pages of 64 pads + 16 knobs take 3912, the rest is room for ~30 SHIFT assignments. (Why a budget: see "UNIVERSAL mode".)
+
+The hello's version: 1 up to v0.29, **2** in v0.30 (`0D` / `0E` / `0F`), **3** in v0.31-v0.31c (the UNIVERSAL pages, `10`-`15`),
+**5** since v0.31d (the DAW page, `1A`-`1E`; 4 belonged to the rolled-back v0.32 and is never used); **6** since v0.31f (14-bit DAW levels, `1E <dir> <count>`). A host that sees 6 speaks the current DAW page. **7** since v0.31r (`20` remote input; `03`-`05` gone). **8** since v0.33 (`21`-`24` ORC mode). **9** since v0.34 (`25`); still 9 in v0.39 (v0.36 only dropped commands).
 
 **Senders (on the Pi, `~/fire_fw/`):**
-- `host_text.py "message"` sends command 05.
-- `host_vu_demo.py` is a 10-second example of command 01 with made-up levels.
-- **`host_vu.py` = the real audio VU**, running as the service **`orc1-firevu`** (enabled at boot). It reads the
-  newest ~43 ms of a skipback RAM ring (the master: a stereo RAM track named like MAIN, else any RAM ring; read-only,
-  straight from tmpfs, no JACK client), splits it into 16 log bands (40 Hz to 14 kHz, +3 dB per octave tilt so highs
-  aren't flat) and sends 16 levels ~23 times a second. The gain follows the music (the loudest band is full scale,
-  the bars span 36 dB; it relaxes about 3 dB a second), a gate at -68 dBFS keeps hiss and the gaps between songs dark.
-  On the Fire: **BROWSER > Lights > Show > PI VU** (then Start lights). It runs at idle CPU priority (about 3% of a core in
-  silence, 6-8% while analysing music: measured), `MemoryMax=64M`, and is killed first under memory pressure: skipback comes first.
-  `host_vu_test.py` (79 checks, 27 mutations all red) tests it against a fake ring; `host_vu_cost.py` measures its CPU.
+- `fire_press.py` plays the Fire remotely (command `20`, v0.31r): see `20` above. (`host_text.py`, command 05, went with the shows.)
+- `host_crash.py` reads and decodes the crash record (`06` / `08`), see Crashes.
+- `host_vu.py` (the Pi VU sender, service `orc1-firevu`) is retired: the firmware ignores its `01` / `02` since v0.36.
 
 ### Crashes (since 2026-10-13)
+**If your Fire crashes** (it goes dark and restarts by itself, or ends up dark in update mode): open **BROWSER >
+About** and take a photo of the first screen. Version, Build, Crash, In, PC and LR together say where in the code it
+happened. Put the photo in a bug report (see the README). **Since v0.39 the last crash survives unplugging**, so there
+is no hurry: unplug, take the Fire home, photograph About later. If the Fire is stuck dark in update mode (3 crashes in
+a row), run Install again (keep your patterns), then look at About.
+
 On 2026-10-13 at 21:00 the Fire fell into DFU (update mode) 63 minutes after a flash, with no sign of why: every fault
 handler just rebooted to DFU. Now a **fault or a watchdog reset is recorded and the Fire restarts itself** in 2-5 s:
 - The record lives in the RTC backup registers (they survive a reset): the cause (HardFault / MemManage / BusFault /
@@ -436,10 +636,15 @@ handler just rebooted to DFU. Now a **fault or a watchdog reset is recorded and 
   stage of the main loop was running (USB + MIDI, sequencer, queues, input events, gates, flash saver, lights, knobs,
   paint, render + OLED, loop tail, start-up).
 - The header's status slot shows `FAULT RST` or `WDOG RST` after a restart.
+- **v0.39: the record is also kept in flash** (save kind 61, 64 bytes), because the backup registers do not survive a
+  power-off (the Fire has no backup battery). At boot, a crash in the registers that flash does not hold yet is copied
+  there (on its own, at a quiet moment, even with AUTOSAVE off); with nothing in the registers, the flash copy is the
+  crash on record (About, `06`). `06 01` clears both. A boot with no crash writes nothing. The stack snapshot (`08`)
+  stays RAM-only: it is lost at power-off.
 - **A crash loop still falls back to DFU:** 3 crashes in a row, each within 30 s of booting, leave it in update mode so a
   bad image can be replaced without a debugger.
-- Read it with `python3 host_crash.py [--elf fireseq.elf]` (the PC becomes a source line); `--clear` clears it. The VU
-  service (`orc1-firevu`) also logs any crash the Fire reports when it connects.
+- Read it with `python3 host_crash.py [--elf fireseq.elf]` (the PC becomes a source line); `--clear` clears it. The
+  ORC also saves any new crash the Fire reports when it connects.
 - Proven on the real chip with a bench build (`crash_bench.py`: a bus fault, a hang, an undefined instruction, then the
   crash-loop fallback, 15/15). The bench hook (`7E`) is compiled out of the shipped image (`#ifdef CRASH_TEST`).
 - A watchdog hang cannot say WHERE it hung (nobody was running), only which stage: that is why the stage markers exist.
@@ -489,5 +694,7 @@ has a test that fails without it.
 
 ## Getting back to Akai's firmware
 
-From the Pi: `~/fire_fw/fw/fire_flash.sh stock` (see `fw/DEVELOPER.md`). Saved patterns stay in
-their own flash area and come back if this firmware is flashed again.
+With the installer from the release page: **Restore original Akai firmware** (`.bat` on Windows, `.command` on macOS /
+Linux) puts back the copy of Akai's firmware that Install saved from your Fire the first time. From the owner's Pi:
+`~/fire_fw/fw/fire_flash.sh stock` (see `fw/DEVELOPER.md`). Saved patterns stay in their own flash area and come back
+if this firmware is flashed again (Restore clears them, after saving them in a backup).

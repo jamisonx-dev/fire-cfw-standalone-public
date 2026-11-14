@@ -50,7 +50,7 @@ say "flashing"
 sh fw/fire_flash.sh app "$NAME.bin" 2>&1 | tail -1 | tee .release_flash.log
 grep -q "verify: OK" .release_flash.log || die "the flash did not verify (still in update mode: flash a known-good bin, or fire_flash.sh boot)"
 sh fw/fire_flash.sh boot >/dev/null 2>&1
-i=0; until python3 -c "import mido,sys; sys.exit(0 if any('ORC FW' in n for n in mido.get_output_names()) else 1)" 2>/dev/null; do
+i=0; until python3 -c "import mido,sys; sys.exit(0 if any('FLAME seq' in n or 'ORC FW seq' in n for n in mido.get_output_names()) else 1)" 2>/dev/null; do
     i=$((i + 1)); [ $i -gt 30 ] && die "the Fire's MIDI port did not come back (lsusb: $(lsusb | grep -E '0483:df11|1209:0001'))"; sleep 1
 done
 echo "$FW/$NAME.bin" > FLASHED

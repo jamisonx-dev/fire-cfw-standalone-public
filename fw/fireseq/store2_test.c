@@ -194,6 +194,35 @@ int main(void)
     CHECK(!store2_read(3, got, sizeof got), "after compact: dropped kinds are gone");
     CHECK(store2_free_bytes() > S2_AREA_SIZE - 5000, "after compact: space is back");
 
+    /* v0.31: a universal page (kind 49 + p) streamed in as the host sends it, next to the patterns */
+    {
+        static uint8_t page[129];
+        for (int i = 0; i < (int)sizeof page; i++) page[i] = (uint8_t)(i * 7 & 0x7F);
+        CHECK(store2_append(49, page, 57), "a page record (kind 49) next to the patterns");
+        uint32_t f0 = store2_free_bytes();
+        CHECK(store2_begin(49, page, sizeof page) && store2_words_total() == 8 + 33 + 2, "streamed write: 8 header + 33 payload + CRC + commit words");
+        int staged = 1;
+        while (store2_words_done() < 8 + 12) { store2_step(1); if (store2_words_done() > 8 + 12) staged = 0; }
+        uint32_t ln = 0;
+        const uint8_t *cur = store2_ptr(49, &ln);
+        CHECK(staged && store2_busy() && ln == 57 && cur && !memcmp(cur, page, 57), "stepped a word at a time: the old page still counts mid-write");
+        while (store2_words_done() < store2_words_total() - 1) store2_step(1);
+        CHECK(store2_busy() && !memcmp(store2_busy_payload(), page, sizeof page), "every word but the commit written: the payload is readable in flash, not yet counted");
+        store2_step(1);
+        cur = store2_ptr(49, &ln);
+        CHECK(!store2_busy() && ln == sizeof page && !memcmp(cur, page, sizeof page) && store2_words_done() == 0 && !store2_busy_payload(),
+              "the commit word: the new page counts");
+        CHECK(store2_begin(50, page, 9) && (store2_step(3), store2_busy()), "another page begun");
+        store2_cancel();
+        store2_scan();
+        CHECK(!store2_ptr(50, &ln) && store2_ptr(49, &ln) && ln == sizeof page && store2_free_bytes() < f0, "a cancelled page never counts (after a rescan too)");
+        int kinds[3] = {S2_KIND_GLOBAL, 49, 56};
+        const void *items[3] = {g1, page, page};
+        uint32_t lens[3] = {sizeof g1, sizeof page, 9};
+        CHECK(store2_compact(kinds, items, lens, 3) && store2_ptr(56, &ln) && ln == 9 && store2_ptr(49, &ln) && ln == sizeof page,
+              "pages 1 and 8 rewritten by a compaction");
+    }
+
     /* migration: an area holding only old v2 records is not v3 data, but the legacy loader reads it */
     store_hw_erase();
     store_data_t old; memset(&old, 0, sizeof old);
@@ -204,6 +233,6 @@ int main(void)
     store_data_t back;
     CHECK(store_load(&back) && back.bpm == 94 && back.steps[3][0] == 0x1111 && back.swing == 60 && back.track_note[1] == 40, "legacy loader reads the old saves (newest)");
 
-    printf("%d checks, %s\n", checks, fails ? "FAILED" : "ALL PASSED");
-    return fails != 0;
+    printf("%d checks, %s\n", checks, fails ? "FAILED" : checks != 52 ? "EXPECTED 52 checks" : "ALL PASSED");
+    return fails != 0 || checks != 52;              /* v0.31: a count drift fails the run */
 }

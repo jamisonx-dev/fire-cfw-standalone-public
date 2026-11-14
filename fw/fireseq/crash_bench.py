@@ -34,8 +34,8 @@ def usb():
 
 
 def ports():
-    outs = [n for n in mido.get_output_names() if "ORC FW" in n]
-    ins = [n for n in mido.get_input_names() if "ORC FW" in n]
+    outs = [n for n in mido.get_output_names() if ("FLAME seq" in n or "ORC FW seq" in n)]
+    ins = [n for n in mido.get_input_names() if ("FLAME seq" in n or "ORC FW seq" in n)]
     return (mido.open_output(outs[0]), mido.open_input(ins[0])) if outs and ins else (None, None)
 
 

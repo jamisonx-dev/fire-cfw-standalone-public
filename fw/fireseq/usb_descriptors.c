@@ -23,22 +23,41 @@ static tusb_desc_device_t const desc_device = {
 
 uint8_t const *tud_descriptor_device_cb(void) { return (uint8_t const *)&desc_device; }
 
+/* v0.36 (DAW mode): TWO MIDI ports on one interface. Cable 0 = the sequencer (exactly what the single port was:
+   its notes, clock, the ORC's host SysEx); cable 1 = DAW control (Mackie Control / HUI), so a DAW never reads the
+   sequencer's notes as button presses. Each jack carries its own name (string 4 / 5). */
 enum { ITF_NUM_MIDI = 0, ITF_NUM_MIDI_STREAMING, ITF_NUM_TOTAL };
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_MIDI_DESC_LEN)
+#define MIDI_CABLES 2
+#define MIDI_DESC_LEN_N (TUD_MIDI_DESC_HEAD_LEN + MIDI_CABLES * TUD_MIDI_DESC_JACK_LEN + 2 * TUD_MIDI_DESC_EP_LEN(MIDI_CABLES))
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + MIDI_DESC_LEN_N)
 #define EPNUM_MIDI_OUT 0x01
 #define EPNUM_MIDI_IN  0x81
+#define STR_JACK_SEQ 4
+#define STR_JACK_DAW 5
 
 static uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 500),
-    TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 0, EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 64),
+    TUD_MIDI_DESC_HEAD(ITF_NUM_MIDI, 0, MIDI_CABLES),
+    TUD_MIDI_DESC_JACK_DESC(1, STR_JACK_SEQ),
+    TUD_MIDI_DESC_JACK_DESC(2, STR_JACK_DAW),
+    TUD_MIDI_DESC_EP(EPNUM_MIDI_OUT, 64, MIDI_CABLES), TUD_MIDI_JACKID_IN_EMB(1), TUD_MIDI_JACKID_IN_EMB(2),
+    TUD_MIDI_DESC_EP(EPNUM_MIDI_IN, 64, MIDI_CABLES), TUD_MIDI_JACKID_OUT_EMB(1), TUD_MIDI_JACKID_OUT_EMB(2),
 };
+_Static_assert(sizeof desc_configuration == CONFIG_TOTAL_LEN, "MIDI descriptor length");
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) { (void)index; return desc_configuration; }
 
 static char const *string_desc_arr[] = {
     (const char[]){0x09, 0x04},   /* English */
-    "ORC-1",
-    "ORC FW seq",
+    "FLAME",                      /* maker. v0.36: the firmware is "Akai Fire FLAME custom firmware" (was "ORC-1") */
+    "FLAME",                      /* the device. v0.36: was "ORC FW seq"; now the PORTS carry seq / DAW. Linux names a
+                                     port "<device> <jack>" unless the jack name starts with the device name, so with
+                                     "FLAME" the ports should be exactly "FLAME seq" + "FLAME DAW" (measured v0.36p:
+                                     with the device still "ORC FW seq", port 1 was "ORC FW seq ORC FW DAW", which every
+                                     seq-port matcher on the ORC also caught) */
+    "",                           /* 3 = the serial number (serial_from_uid) */
+    "FLAME seq",                  /* 4 = cable 0's jacks: the sequencer */
+    "FLAME DAW",                  /* 5 = cable 1's jacks: Mackie Control / HUI */
 };
 
 static uint16_t _desc_str[33];

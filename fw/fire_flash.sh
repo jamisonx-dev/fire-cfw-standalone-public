@@ -20,15 +20,16 @@ dfu)
     if in_dfu; then echo "already in DFU"; exit 0; fi
     python3 - "$PORT" <<'PY'
 import sys, time, mido
-name = next((n for n in mido.get_output_names() if 'FL STUDIO FIRE' in n or 'ORC FW' in n), None)
+name = next((n for n in mido.get_output_names() if 'FL STUDIO FIRE' in n or 'FLAME seq' in n or 'ORC FW seq' in n), None)
 if not name:
     sys.exit("no Fire MIDI port (our firmware may not speak MIDI yet: use the button combo or wait for its own DFU reboot)")
 o = mido.open_output(name)
 o.send(mido.Message('sysex', data=[0x47, 0x7F, 0x43, 0x72, 0x00, 0x00]))  # cmd 0x72 = reboot to DFU (NOT 0x78)
 time.sleep(0.3); o.close()
 PY
-    for i in 1 2 3 4 5 6 7 8 9 10; do sleep 0.5; in_dfu && { echo "in DFU"; exit 0; }; done
-    echo "Fire did not enter DFU"; exit 1 ;;
+    # 25 s like fire_release.sh: 5 s once gave up while the Fire entered update mode a moment later (2026-11-11)
+    i=0; while [ $i -lt 50 ]; do sleep 0.5; in_dfu && { echo "in DFU"; exit 0; }; i=$((i + 1)); done
+    echo "Fire did not enter DFU (waited 25 s)"; exit 1 ;;
 app)
     [ -f "$2" ] || { echo "usage: $0 app <file.bin>"; exit 1; }
     [ "$(stat -c%s "$2")" = 98304 ] || { echo "image must be exactly 98304 bytes"; exit 1; }

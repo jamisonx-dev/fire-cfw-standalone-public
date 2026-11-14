@@ -1,0 +1,100 @@
+name: Report a problem
+description: Something did not work right on your Fire.
+title: "Problem: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing!
+
+        **How this works**
+
+        ### Let me know what happened via either a photo of the Fire's About page or by filling out the form
+        On the Fire:
+        1. Press **BROWSER**.
+        2. Turn *SELECT* down to *About*
+        3. Press *SELECT*
+        4. Take a photo of the screen or use that info below
+
+  - type: textarea
+    id: photo
+    attributes:
+      label: Photo of the About page and/or a video, etc
+      description: Drag your photos here or paste them in. A picture or short video of the problem helps a lot and can save you a lot of writing
+
+  - type: markdown
+    attributes:
+      value: |
+        ***Use the form below if you can't/don't want to deal with a photo***
+
+  - type: dropdown
+    id: version
+    attributes:
+      label: Which version of the firmware?
+      description: Shown in both the About page and the name of the file you downloaded
+      # RELEASE STEP: replace the first option with the exact version name of the public release this form ships with.
+      # Only builds with the About page (v0.35+) belong here; v0.29b has none, so it is left out on purpose.
+      options:
+        - v0.39
+        - I don't know
+
+  - type: input
+    id: build
+    attributes:
+      label: Build
+
+  - type: input
+    id: crash
+    attributes:
+      label: Crash
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: IN
+      description: Which mode was the Fire in?
+      options:
+        - STEP
+        - NOTE
+        - DRUM
+        - PERFORM
+        - UNIVERSAL
+        - DAW mode
+        - Paint
+        - A menu
+        - I don't know
+
+  - type: input
+    id: pc-lr
+    attributes:
+      label: PC/LR/Crashes/Uptime (scroll down)
+      description: (if applicable)
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what were you doing/what was going on when it happened? (brief description)
+      description: For example, "I was playing pattern 3 and I turned a knob and it went black for a sec then reset back to the main screen"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-often
+    attributes:
+      label: How often has it happened?
+      options:
+        - Once
+        - Sometimes
+        - Every time
+
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else that may apply
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        Advanced, only if you want to: [a small program that reads the Fire's crash note](https://github.com/jamisonx-dev/fire-cfw-standalone-public/blob/main/tools/fire_crash_report.py). Paste what it prints under "Anything else that may apply".

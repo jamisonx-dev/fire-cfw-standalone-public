@@ -7,7 +7,7 @@ Usage: python3 clock_lock_test.py [seconds]
 """
 import mido, sys, time, statistics
 secs = float(sys.argv[1]) if len(sys.argv) > 1 else 30
-name = next(n for n in mido.get_input_names() if 'ORC FW seq' in n)
+name = next(n for n in mido.get_input_names() if ('FLAME seq' in n or 'ORC FW seq' in n))
 i = mido.open_input(name)
 ticks, kicks = [], []
 t0 = time.time()

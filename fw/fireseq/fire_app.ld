@@ -11,6 +11,8 @@ MEMORY
 }
 
 _estack = ORIGIN(RAM) + LENGTH(RAM);
+/* The least room the stack must have (a build check only: nothing at run time uses it). v0.31r: removing the light
+   shows freed 536 B of RAM, so the stack has 4708 B (2026-11-11); the deepest seen in every crash record was 1372 B. */
 _Min_Stack_Size = 0x1000;
 
 SECTIONS

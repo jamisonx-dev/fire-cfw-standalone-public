@@ -16,7 +16,7 @@ CFLAGS  := $(CPU) -Os -g -Wall -Wextra -ffunction-sections -fdata-sections -fsta
 LDFLAGS := $(CPU) -T fire_app.ld -Wl,--gc-sections -Wl,-Map=fireseq.map \
            --specs=nano.specs --specs=nosys.specs
 
-SRC := main.c usb_descriptors.c token.c fire_hw.c oled.c draw.c store.c store2.c store_hw.c steps.c play.c lights.c screens.c crash.c ctl.c \
+SRC := main.c usb_descriptors.c token.c fire_hw.c oled.c draw.c store.c store2.c store_hw.c steps.c play.c screens.c crash.c ctl.c uni.c compact.c remote.c hostm.c daw.c paint.c \
        $(ST)/Source/Templates/system_stm32f4xx.c \
        $(TUSB)/tusb.c $(TUSB)/common/tusb_fifo.c \
        $(TUSB)/device/usbd.c \

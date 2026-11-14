@@ -95,13 +95,14 @@ Akai's bootloader (sector 0) is never written, so 1-4 always remain available.
 | `store_hw.c` | Flash erase/program for sector 5 only |
 | `steps.c/.h` | **Sparse step storage** (v0.10): only lit steps take RAM |
 | `play.c/.h` | What a step sends: locks, chords, TIE/SLIDE, conditions (v0.11) |
-| `lights.c/.h`, `lights_tab.h` | Pad light shows (the ORC's shows ported, TRACKS, PI VU bars, TEXT), no libm |
+| `lights.c/.h` | The PI VU bars (5 looks, heat colours, dither), no libm. v0.31r removed the light shows, TRACKS, TEXT and `lights_tab.h` |
+| `remote.c/.h` | v0.31r remote input (host `20`): the host presses buttons / pads and turns knobs through the same path as real input |
 | `screens.c/.h` | Picture-style OLED screens (header, step dots, faders, menu, popups) |
 | `crash.c/.h` | Crash recorder logic: restart-vs-update-mode decision, the host reply (v2: build, SP, stack low point) |
 | `ctl.c/.h` | The control decisions from the 2026-10-13 review as pure functions (Show list, host parsing, idle start, frame timer, PI VU fallback, CYCLE, lazy save) |
 | `*_test.c`, `wiring_test.py`, `*_mutate.py` | Host tests + mutation scripts (see Testing) |
 | `fire_live_test.py` | Behaviour checks ON the Fire through host status command 07 |
-| `host_vu.py` (service `orc1-firevu`), `host_text.py`, `host_crash.py` | Pi-side senders / readers of the host protocol |
+| `host_vu.py` (service `orc1-firevu`), `fire_press.py` (v0.31r remote input), `host_crash.py` | Pi-side senders / readers of the host protocol |
 | `usb_descriptors.c`, `tusb_config.h` | USB MIDI device (VID/PID 1209:0001, pid.codes test ID) |
 
 Timers: TIM2 = 1 MHz free-running step clock, TIM4 = 2 kHz chain refresh, SysTick = 1 ms.
@@ -174,8 +175,7 @@ gcc -O2 -Wall -o store_test store_test.c store.c && ./store_test               #
 Since v0.15-v0.17 also (counts are self-checked: a suite whose count drifts fails):
 ```bash
 gcc -O1 -Wall -Wextra -I. ctl_test.c ctl.c lights.c -lm -o ctl_test && ./ctl_test             # 73
-gcc -O1 -Wall -Wextra -I. lights_test.c lights.c -lm -o lights_test && ./lights_test          # 1441
-./lights_test dump | python3 lights_vs_orc.py ~/orc/orc1/orc1_fire.py                         # 4928 pads, 0 differ
+gcc -O1 -Wall -Wextra -I. lights_test.c lights.c -lm -o lights_test && ./lights_test          # 1268 (v0.31r: the bars only)
 gcc -O1 -Wall -Wextra -I. screens_test.c screens.c draw.c -o screens_test && ./screens_test    # 14
 gcc -O1 -Wall -Wextra -I. crash_test.c crash.c -o crash_test && ./crash_test                  # 32
 gcc -O1 -Wall -Wextra -I. play_test.c play.c -o play_test && ./play_test                      # 41

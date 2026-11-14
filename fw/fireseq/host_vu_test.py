@@ -15,7 +15,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host_vu as H
 
-EXPECTED = 121
+EXPECTED = 135
 passed = failed = 0
 
 
@@ -378,7 +378,8 @@ check("a port that will not open: False, no crash", link(fire4, FRAME, 0.0) is F
 import contextlib
 import io
 
-C_VECTOR = bytes.fromhex("7d4f52430602010307020945460440004d5702400000000008060008000000000000000400200000024b466801004d782c5101007d0300022342030002")  # crash_test hex (v2)
+C_VECTOR_V2 = bytes.fromhex("7d4f52430602010307020945460440004d5702400000000008060008000000000000000400200000024b466801004d782c5101007d0300022342030002")  # crash_test hex (v2)
+C_VECTOR = bytes.fromhex("7d4f52430603010307020945460440004d5702400000000008060008000000000000000400200000024b466801004d782c5101007d0300022342030002030000000075534c09000200000000697f7f7f0f617f7f7f0f697f7f7f0f")  # crash_test hex (v3, + the TIM4 check note)
 C_VECTOR_V1 = bytes.fromhex("7d4f52430601010307020945460440004d5702400000000008060008000000000000000400200000024b46680100")  # the same record, v1
 c = H.decode_crash(C_VECTOR)
 check("the C firmware's crash reply decodes: cause BusFault, stage lights, counts 2 / 9",
@@ -396,7 +397,25 @@ check("a reply of the wrong length, header or version is not a crash record",
       H.decode_crash(C_VECTOR[:-1]) is None and H.decode_crash(bytes([0]) + C_VECTOR[1:]) is None
       and H.decode_crash(C_VECTOR[:5] + bytes([1]) + C_VECTOR[6:]) is None       # v1 marker on a v2-length reply
       and H.decode_crash(C_VECTOR_V1[:5] + bytes([2]) + C_VECTOR_V1[6:]) is None  # v2 marker on a v1-length reply
-      and H.decode_crash(C_VECTOR[:5] + bytes([3]) + C_VECTOR[6:]) is None and H.decode_crash(b"") is None)
+      and H.decode_crash(C_VECTOR[:5] + bytes([2]) + C_VECTOR[6:]) is None       # v2 marker on a v3-length reply
+      and H.decode_crash(C_VECTOR[:5] + bytes([4]) + C_VECTOR[6:]) is None and H.decode_crash(b"") is None)
+check("v3: the TIM4 check note decodes exactly (count, uptime, verdict, slot seen, yardstick seen, the real EXC_RETURN)",
+      c and (c["t4_count"], c["t4_ms"], c["t4_kind"], c["t4_seen"], c["t4_want"], c["t4_exc"])
+      == (3, 20130293, 2, 0xFFFFFFE9, 0xFFFFFFE1, 0xFFFFFFE9), c)
+c2 = H.decode_crash(C_VECTOR_V2)
+check("a v2 reply (v0.29d - v0.31f) still decodes: same fields, no note",
+      c2 is not None and c2["pc"] == 0x08012345 and c2["build"] == 0x1A2B3C4D and "t4_count" not in c2
+      and H.describe_t4_note(c2) is None, c2)
+tn = H.describe_t4_note(c)
+check("the note is described: how many, when, the verdict and the three values",
+      tn and "3 mismatch" in tn and "20130.3 s" in tn and "STALE" in tn and "0xffffffe1" in tn and "not a crash" in tn, tn)
+unk = H.describe_crash(dict(c, cause=9, cause_name=H.decode_crash(C_VECTOR[:7] + bytes([9]) + C_VECTOR[8:])["cause_name"], cfsr=5))
+check("a cause this decoder doesn't know says so and is NOT dressed up as a fault (11-09: CFSR 5 read as 'jump into RAM')",
+      "UNKNOWN" in unk and "jump into RAM" not in unk and "CFSR 0x00000005" in unk, unk)
+r1109 = H.describe_crash(dict(c, cause=8, cause_name=H.CRASH_CAUSES[8], stage=10, stage_name="render + OLED", cfsr=5,
+                              addr=0x2000fc80, hfsr=0x2000fbf8, sp=0x2000fbf8, pc=0x0801524a, lr=0x08012733, psr=0x29010000))
+check("the real 2026-11-09 record reads as a kind-5 slip with a 136-byte TIM4 frame and no SP move, in the main loop",
+      "saved return address changed" in r1109 and "frame 136 bytes" in r1109 and "moved +0" in r1109 and "the main loop" in r1109, r1109)
 # the stack snapshot (command 08, v0.17c), decoded from bytes made by the C code (crash_test stackhex)
 S_VECTOR = bytes.fromhex("7d4f5243080101687a0300020000000002040000000208000000020c000000021000000002390803400018000000021c000000022000000002333502400028000000022c000000023000000002340000000238000000023c000000024000000002440000000248000000024c000000025000000002540000000258000000025c000000026000000002640000000268000000026c000000027000000002740000000278000000027c000000020001000002040100000208010000020c010000021001000002140100000218010000021c010000022001000002240100000228010000022c010000023001000002340100000238010000023c010000024001000002440100000248010000024c010000025001000002540100000258010000025c010000026001000002640100000268010000026c010000027001000002740100000278010000027c01000002")
 st = H.decode_stack(S_VECTOR)
@@ -424,6 +443,9 @@ check("the description names the cause, stage and fault kind, and gives PC / LR"
       "BusFault" in d1 and "lights" in d1 and "precise bus error" in d1 and "0x08012345" in d1 and "0x0800abcd" in d1, d1)
 wd = H.describe_crash(dict(c, cause=5, cause_name="watchdog (a hang)"))
 check("a watchdog hang names the stage but has no PC (nobody knows where)", "watchdog" in wd and "lights" in wd and "PC 0x" not in wd, wd)
+sl = H.describe_crash(dict(c, cause=8, cause_name=H.CRASH_CAUSES[8], cfsr=3, addr=0x2000fc38, hfsr=0x2000fbb8, sp=0x2000fbc0, psr=0x2100e000))
+check("a TIM4 slip (v0.29d) names its kind, the SPs and how far it moved, and what it interrupted",
+      "after the SPI chain" in sl and "0x2000fc38" in sl and "frame 128 bytes" in sl and "moved +8" in sl and "the main loop" in sl, sl)
 
 # the Fire object: asks for the record once per connection, and tells the journal ONCE per crash
 buf = io.StringIO()
@@ -751,6 +773,47 @@ check("it never writes to the skipback folder (reads only)", 'open(os.path.join(
       and '"wb"' not in src_text and "'wb'" not in src_text and '"w")' not in src_text)
 check("it asks for idle CPU priority first thing in main()", "idle_priority()" in src_text.split("def main(")[1].split("while True")[0])
 check("no JACK client (reads memory only)", "jack" not in src_text.lower().replace("no jack client", ""))
+
+# ---------------------------------------------------------------- the ORC's mido leak fix (2026-11-09)
+import tempfile as _tf
+_saved_path = list(sys.path)
+_empty = _tf.mkdtemp()
+sys.modules.pop("orc1_midisafe", None)
+check("no ORC installed: use_midisafe is quietly off", H.use_midisafe(_empty) is False and "orc1_midisafe" not in sys.modules)
+_fake = _tf.mkdtemp()
+with open(os.path.join(_fake, "orc1_midisafe.py"), "w") as _f:
+    _f.write("CALLS = []\ndef install():\n    CALLS.append(1)\n    return True\n")
+sys.modules.pop("orc1_midisafe", None)
+check("ORC installed: use_midisafe installs the fix", H.use_midisafe(_fake) is True
+      and sys.modules["orc1_midisafe"].CALLS == [1])
+check("its folder is APPENDED to sys.path (never shadows our modules)", sys.path[-1] == _fake)
+sys.path[:] = _saved_path
+sys.modules.pop("orc1_midisafe", None)
+# ---------------------------------------------------------------- host_crash --save skips a record it already saved
+try:
+    import host_crash as _HC
+except ImportError:                                  # no mido here: these 4 run on the Pi
+    _HC = None
+if _HC is not None:
+    _cd = _tf.mkdtemp()
+    _rec = {"build": 0xc716fbc2, "up_ms": 20130293, "pc": 0x0801524a}
+    with open(os.path.join(_cd, "crash_20261109_173302_c716fbc2.txt"), "w") as _f:
+        _f.write("TIM4 stack slip ...\n  read x; cause ? uptime 20130293 ms\n  PC 0x0801524a  LR 0x08012733\n")
+    check("crash save: the same record (build + PC + uptime) is found", _HC.already_saved(_rec, _cd)
+          == "crash_20261109_173302_c716fbc2.txt")
+    check("crash save: another uptime = a NEW crash", _HC.already_saved(dict(_rec, up_ms=5), _cd) is None)
+    check("crash save: another build = a NEW crash", _HC.already_saved(dict(_rec, build=0x1ea5c99c), _cd) is None)
+    check("crash save: no crash folder yet = nothing saved", _HC.already_saved(_rec, os.path.join(_cd, "nope")) is None)
+else:                                                # keep the total fixed: a missing check never looks like a pass
+    for _n in range(4):
+        check(f"crash save check {_n + 1} [SKIPPED: no mido]", True)
+
+import re as _re
+_main = src_text.split("def main(")[1].split("while True")[0]
+_call = _re.search(r"\n[ \t]+use_midisafe\(", _main)                 # a real call statement, not a comment
+check("main() installs it right after importing mido",
+      _call is not None and _call.start() > _main.index("import mido as mido_mod")
+      and "Fire(mido" in _main[_call.start():])
 
 total = passed + failed
 print(f"\n{passed} passed, {failed} failed" + ("" if total == EXPECTED else f"   (EXPECTED {EXPECTED}, ran {total})"))

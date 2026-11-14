@@ -53,6 +53,30 @@ def find_elf(build):
     return max(hits, key=os.path.getmtime) if hits else None
 
 
+def already_saved(c, crash_dir):
+    """The saved report of THIS record, if there is one (2026-11-09): the Fire keeps its last crash record and
+    reports it on every connect, so firevu re-saved the same crash after every restart / flash. A record is the
+    same crash when the build, the PC and the uptime at the fault all match (each saved file has those lines).
+    Returns the file name, or None."""
+    build = c.get("build") or 0
+    want = (f"uptime {c['up_ms']} ms", f"PC 0x{c['pc']:08x}")
+    try:
+        names = sorted(os.listdir(crash_dir))
+    except OSError:
+        return None
+    for n in names:
+        if not (n.startswith("crash_") and n.endswith(f"_{build:08x}.txt")):
+            continue
+        try:
+            with open(os.path.join(crash_dir, n)) as f:
+                text = f.read()
+        except OSError:
+            continue
+        if all(w in text for w in want):
+            return n
+    return None
+
+
 def main(argv):
     clear, save = "--clear" in argv, "--save" in argv
     elf = argv[argv.index("--elf") + 1] if "--elf" in argv and argv.index("--elf") + 1 < len(argv) else None
@@ -60,8 +84,8 @@ def main(argv):
         elf = "auto"
     lines = []
     say = lines.append
-    outs = [n for n in mido.get_output_names() if "ORC FW" in n]
-    ins = [n for n in mido.get_input_names() if "ORC FW" in n]
+    outs = [n for n in mido.get_output_names() if ("FLAME seq" in n or "ORC FW seq" in n)]
+    ins = [n for n in mido.get_input_names() if ("FLAME seq" in n or "ORC FW seq" in n)]
     if not outs or not ins:
         print("no Fire found (its MIDI port is called 'ORC FW ...'; it may be in DFU / update mode)")
         return 1
@@ -81,6 +105,9 @@ def main(argv):
         print("no answer to command 06 (an older firmware, or the Fire is busy)")
         return 1
     say(H.describe_crash(c))
+    note = H.describe_t4_note(c) if hasattr(H, "describe_t4_note") else None
+    if note:
+        say("  " + note)
     if c["valid"]:
         say(f"  read {time.strftime('%Y-%m-%d %H:%M:%S')}; cause {c['cause_name']}  stage {c['stage']} ({c['stage_name']})  uptime {c['up_ms']} ms")
         if c.get("build"):
@@ -128,9 +155,20 @@ def main(argv):
                     tag = "  <- code" + (": " + sym(w) if sym else "")
                 elif frame and i < 8:
                     tag = "  (" + ("R0", "R1", "R2", "R3", "R12", "LR", "PC", "xPSR")[i] + ")"
+                if c["cause"] == 8:                 # a TIM4 slip: mark where its stack started and the frame it should return to
+                    a = st["base"] + 4 * i
+                    if a == c["hfsr"]:
+                        tag += "  <- TIM4's SP as it started"
+                    if a == c["addr"] - 4:
+                        tag += "  <- TIM4's saved return (EXC_RETURN) slot"
+                    if 0 <= a - c["addr"] < 32:
+                        tag += "  [interrupted frame " + ("R0", "R1", "R2", "R3", "R12", "LR", "PC", "xPSR")[(a - c["addr"]) // 4] + "]"
                 say(f"    +{4 * i:3d}  0x{w:08x}{tag}")
     print("\n".join(lines))
-    if save and c["valid"]:
+    dup = already_saved(c, CRASH_DIR) if save and c["valid"] else None
+    if dup:
+        print(f"(already saved as {dup}: the Fire keeps its last record and reports it on every connect)")
+    elif save and c["valid"]:
         os.makedirs(CRASH_DIR, exist_ok=True)
         fn = os.path.join(CRASH_DIR, f"crash_{time.strftime('%Y%m%d_%H%M%S')}_{c.get('build') or 0:08x}.txt")
         with open(fn, "w") as f:

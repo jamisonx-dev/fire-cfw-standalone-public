@@ -1,40 +1,5 @@
 #include "ctl.h"
-#include "lights.h"
 
-const uint8_t SHOW_ORDER[SHOW_N] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, SHOW_HOST, SHOW_TEXT, SHOW_CYCLE};
-
-int ctl_show_pos(int v)
-{
-    for (int i = 0; i < SHOW_N; i++) if (SHOW_ORDER[i] == v) return i;
-    return 0;
-}
-
-int ctl_show_step(int v, int d)
-{
-    int p = ctl_show_pos(v) + (d > 0 ? 1 : -1);
-    if (p < 0) p = SHOW_N - 1;
-    if (p >= SHOW_N) p = 0;
-    return SHOW_ORDER[p];
-}
-
-int ctl_show_clamp(int v, int d)
-{
-    int p = ctl_show_pos(v) + (d > 0 ? 1 : -1);
-    if (p < 0) p = 0;
-    if (p > SHOW_N - 1) p = SHOW_N - 1;
-    return SHOW_ORDER[p];
-}
-
-int ctl_show_sanitize(int v)
-{
-    v = (int)((unsigned)v % SHOW_VALUES);
-    return v == 11 ? 1 : v;
-}
-
-const char *ctl_show_name(int v)
-{
-    return v == SHOW_CYCLE ? "Cycle" : v == SHOW_HOST ? "Pi VU" : v == SHOW_TEXT ? "Text" : LT_NAME[(v >= 0 && v < LT_MODES) ? v : 0];
-}
 
 ctl_host_t ctl_host_parse(const uint8_t *p, unsigned n)
 {
@@ -44,11 +9,8 @@ ctl_host_t ctl_host_parse(const uint8_t *p, unsigned n)
     case 0x00: if (n == 1) h.cmd = HC_HELLO; break;
     case 0x01: if (n == 17) { h.cmd = HC_LEVELS; h.data = p + 1; h.len = 16; } break;
     case 0x02: if (n == 2 && p[1] < 2) { h.cmd = HC_LIGHTS; h.arg = p[1]; } break;
-    case 0x03: if (n == 2 && p[1] < 128) { h.cmd = HC_SPEED; h.arg = p[1]; } break;
-    case 0x04: if (n == 2 && p[1] < LT_PICK && p[1] != 11) { h.cmd = HC_EFFECT; h.arg = p[1]; } break;   /* 0-12 except the retired 11 */
-    case 0x05: h.cmd = HC_TEXT; h.data = p + 1; h.len = n - 1; break;
     case 0x06: if (n == 1 || (n == 2 && p[1] < 2)) { h.cmd = HC_CRASH; h.arg = n == 2 ? p[1] : 0; } break;
-    case 0x07: if (n == 1) h.cmd = HC_STATUS; break;
+    case 0x07: if (n == 1 || (n == 2 && p[1] == 1)) { h.cmd = HC_STATUS; h.arg = n == 2; } break;   /* 07 01: + reset the loop max */
     case 0x08: if (n == 1) h.cmd = HC_STACK; break;
     case 0x0A:
         if (n >= 3 && p[1] < 64 && p[2] >= 1 && p[2] <= CTL_SURF_MAX && p[1] + p[2] <= 64 && n == 3u + 3u * p[2]) {
@@ -61,6 +23,27 @@ ctl_host_t ctl_host_parse(const uint8_t *p, unsigned n)
         if (n == 2 && p[1] == 0) { h.cmd = HC_SURFACE; h.arg = 0; }
         else if (n == 3 && p[1] == 1 && p[2] >= 1 && p[2] <= 16) { h.cmd = HC_SURFACE; h.arg = p[2]; }
         break;
+    case 0x0D: if (n == 2 && p[1] < 32) { h.cmd = HC_QUEUE; h.arg = p[1]; } break;
+    case 0x0E: if (n == 2 && p[1] < 2) { h.cmd = HC_BARS; h.arg = p[1]; } break;
+    case 0x10: if (n == 4 && p[1] < 8 && p[2] < 128 && p[3] < 128) { h.cmd = HC_UBEGIN; h.arg = p[1]; h.len = (unsigned)(p[2] << 7 | p[3]); } break;
+    case 0x11:
+        if (n >= 4 && n <= 3 + 24 && p[1] < 128 && p[2] < 128) {
+            int ok = 1;
+            for (unsigned i = 3; i < n; i++) if (p[i] > 127) ok = 0;
+            if (ok) { h.cmd = HC_UCHUNK; h.arg = p[1] << 7 | p[2]; h.data = p + 3; h.len = n - 3; }
+        }
+        break;
+    case 0x12: if (n == 3 && p[1] < 128 && p[2] < 128) { h.cmd = HC_UCOMMIT; h.arg = p[1] << 7 | p[2]; } break;
+    case 0x13: if (n == 4 && p[1] < 8 && p[2] < 128 && p[3] < 128) { h.cmd = HC_UREAD; h.arg = p[1]; h.len = (unsigned)(p[2] << 7 | p[3]); } break;
+    case 0x14: if (n == 1) h.cmd = HC_ULIST; break;
+    case 0x15: if (n == 2 && p[1] < 8) { h.cmd = HC_UCLEAR; h.arg = p[1]; } break;
+    case 0x1A: if (n == 2 && p[1] <= CTL_DAW_ROWS) { h.cmd = HC_DAWN; h.arg = p[1]; } break;   /* v0.31d the DAW page */
+    case 0x1B: if (n >= 7 && p[1] < CTL_DAW_ROWS) { h.cmd = HC_DAWROW; h.arg = p[1]; h.data = p + 2; h.len = n - 2; } break;
+    case 0x1C: if (n == 4 && p[1] < CTL_DAW_ROWS) { h.cmd = HC_DAWLVL; h.arg = p[1]; h.len = (unsigned)((p[2] & 0x7F) << 7 | (p[3] & 0x7F)); } break;   /* v0.31f 14-bit */
+    case 0x20: if (n >= 2) { h.cmd = HC_INPUT; h.arg = p[1]; h.data = p + 2; h.len = n - 2; } break;   /* v0.31r remote input: remote.c checks the rest */
+    case 0x21: if (n == 2 && p[1] <= 2) { h.cmd = HC_HOSTM; h.arg = p[1]; } break;   /* v0.33 ORC mode off / on / still here */
+    case 0x24: if (n == 2 && p[1] >= 10 && p[1] <= 30) { h.cmd = HC_GAMMA; h.arg = p[1]; } break;   /* v0.33 pad colour curve x 10 */
+    case 0x25: if (n == 2 && (p[1] == 0 || (p[1] >= 12 && p[1] <= 64))) { h.cmd = HC_FINEW; h.arg = p[1]; } break;   /* v0.34 the short LED slot: ask (0) / set its share */
     case 0x09:
         if (n == 6) {
             uint32_t a = 0;
@@ -72,6 +55,23 @@ ctl_host_t ctl_host_parse(const uint8_t *p, unsigned n)
     default: break;
     }
     return h;
+}
+
+int ctl_queue_pat(int n, int song, int song_len, int npat, int running, int cur, int *queued)
+{
+    if (n < 0 || n >= (song ? song_len : npat)) return CQ_REFUSE;
+    if (!running) return CQ_NOW;
+    *queued = (!song && n == cur) ? -1 : n;          /* (song mode: a slot is queued even if it is the one playing) */
+    return CQ_QUEUE;
+}
+
+int ctl_bar_msg(uint8_t *out, uint32_t g, int page, int pat, int slot)
+{
+    if (page <= 0 || g % (uint32_t)page) return 0;
+    out[0] = 0xF0; out[1] = 0x7D; out[2] = 0x4F; out[3] = 0x52; out[4] = 0x43; out[5] = 0x0F;
+    out[6] = (uint8_t)(pat & 0x7F); out[7] = (uint8_t)(slot & 0x7F); out[8] = (uint8_t)((g / (uint32_t)page) & 0x7F);
+    out[9] = 0xF7;
+    return CTL_BAR_LEN;
 }
 
 int ctl_peek_ok(uint32_t a)
@@ -96,13 +96,6 @@ int ctl_sysex_payload(const uint8_t *sx, unsigned len, unsigned cap, const uint8
     return 1;
 }
 
-int ctl_idle_should_start(const ctl_idle_t *in)
-{
-    if (in->idle_s <= 0 || in->lt_on || in->menu_on || in->playing || in->ext_playing) return 0;
-    if (in->held || in->editing || in->modifier) return 0;
-    return (uint32_t)(in->now_ms - in->last_input_ms) > (uint32_t)in->idle_s * 1000u;
-}
-
 int ctl_frame_due(uint32_t now_us, uint32_t last_us) { return (uint32_t)(now_us - last_us) >= CTL_FRAME_US; }
 
 int ctl_host_timeout(int lt_on, int lt_host, int show_is_host, uint32_t now_ms, uint32_t host_ms)
@@ -115,11 +108,6 @@ int ctl_host_timeout(int lt_on, int lt_host, int show_is_host, uint32_t now_ms, 
 int ctl_host_reengage(int lt_on, int lt_host, int show_is_host) { return lt_on && !lt_host && show_is_host; }
 
 int ctl_host_stop_ends(int lt_on, int lt_host, int by_host) { return lt_on && (lt_host || by_host); }
-
-int ctl_cycle_due(int show, int lt_cur, int pinned, uint32_t now_ms, uint32_t since_ms)
-{
-    return show == SHOW_CYCLE && !pinned && lt_cur >= 0 && lt_cur < LT_FX && (uint32_t)(now_ms - since_ms) > CTL_CYCLE_MS;
-}
 
 uint32_t ctl_lazy_arm(uint32_t now_ms)
 {
@@ -148,6 +136,8 @@ int ctl_row_release(int *held, int *turned, uint8_t *consumed, int row)
     *held = -1;
     return !*turned;
 }
+
+int ctl_step_displace(int held_pad, int was_lit, int turned) { return held_pad >= 0 && was_lit && !turned; }
 
 int ctl_trk_level(uint8_t stored) { return stored == 0 ? 127 : (stored > 127 ? 127 : stored - 1); }
 
@@ -208,6 +198,112 @@ int ctl_fader_pad(int col, int level)
 {
     int tip = ctl_fader_tip(level);
     return col < tip ? 2 : col == tip ? 1 : 0;
+}
+
+uint32_t ctl_fader_follow(uint8_t *val, const uint8_t *ch, const uint8_t *cc, int n, int status, int num, int value)
+{
+    if ((status & 0xF0) != 0xB0 || num < 0 || num > 127) return 0;
+    int c = (status & 15) + 1;                      /* faders store channels 1-16 */
+    uint8_t v = (uint8_t)(value < 0 ? 0 : value > 127 ? 127 : value);
+    if (n > 32) n = 32;
+    uint32_t changed = 0;
+    for (int f = 0; f < n; f++)
+        if (ch[f] == c && cc[f] == num && val[f] != v) { val[f] = v; changed |= 1u << f; }
+    return changed;
+}
+
+/* ---- fader sets + the DAW page (v0.31d) ---- */
+int ctl_fset_max_top(int n, int add_row, int cap, int view)
+{
+    int rows = n + (add_row && n < cap ? 1 : 0);
+    return rows > view ? rows - view : 0;
+}
+
+int ctl_fset_scroll(int *top, int d, int max_top)
+{
+    int was = *top, t = was + d;
+    if (t > max_top) t = max_top;
+    if (t < 0) t = 0;
+    *top = t;
+    if (d && t == was) return d < 0 ? -1 : 1;
+    return 0;
+}
+
+int ctl_daw_bank_top(int edge, int max_top)
+{
+    return edge > 0 ? 0 : max_top;
+}
+
+int ctl_fset_set(uint8_t *val, int f, int v)
+{
+    v = v < 0 ? 0 : v > 127 ? 127 : v;
+    if (val[f] == v) return 0;
+    val[f] = (uint8_t)v;
+    return 1;
+}
+
+void ctl_daw_count(ctl_daw_t *d, int n)
+{
+    if (n < 0) n = 0;
+    if (n > CTL_DAW_ROWS) n = CTL_DAW_ROWS;
+    d->n = (uint8_t)n;
+    for (int r = n; r < CTL_DAW_ROWS; r++) {
+        d->val[r] = 0; d->fine[r] = 0; d->rgb[r][0] = d->rgb[r][1] = d->rgb[r][2] = 0;
+        for (int i = 0; i <= CTL_DAW_NAME; i++) d->name[r][i] = 0;
+    }
+}
+
+void ctl_daw_rgb(int r, int g, int b, uint8_t out[3])
+{
+    int c[3] = {r, g, b}, mx = 0;
+    for (int i = 0; i < 3; i++) { c[i] = c[i] < 0 ? 0 : c[i] > 127 ? 127 : c[i]; if (c[i] > mx) mx = c[i]; }
+    for (int i = 0; i < 3; i++) out[i] = (uint8_t)(mx ? (c[i] * 7 + mx / 2) / mx : 6);
+}
+
+void ctl_daw_row(ctl_daw_t *d, int row, const uint8_t *data, unsigned len)
+{
+    if (row < 0 || row >= CTL_DAW_ROWS || len < 5) return;
+    ctl_daw_rgb(data[0], data[1], data[2], d->rgb[row]);
+    ctl_daw_level(d, row, (data[3] & 0x7F) << 7 | (data[4] & 0x7F));
+    unsigned k = len - 5;
+    if (k > CTL_DAW_NAME) k = CTL_DAW_NAME;
+    for (unsigned i = 0; i < k; i++) { uint8_t ch = data[5 + i]; d->name[row][i] = (char)(ch >= 0x20 && ch <= 0x7E ? ch : '?'); }
+    for (unsigned i = k; i <= CTL_DAW_NAME; i++) d->name[row][i] = 0;
+}
+
+int ctl_daw_level(ctl_daw_t *d, int row, int fine)
+{
+    if (row < 0 || row >= CTL_DAW_ROWS) return 0;
+    fine = fine < 0 ? 0 : fine > 16383 ? 16383 : fine;
+    if (d->fine[row] == fine) return 0;
+    d->fine[row] = (uint16_t)fine;
+    d->val[row] = (uint8_t)(fine >> 7);
+    return 1;
+}
+
+int ctl_daw_tap_fine(int level)
+{
+    level = level < 0 ? 0 : level > 127 ? 127 : level;
+    return (level * 16383 + 63) / 127;
+}
+
+int ctl_daw_knob_step(uint32_t dt_ms)
+{
+    return dt_ms >= 120 ? 1 : dt_ms >= 60 ? 8 : dt_ms >= 30 ? 32 : 128;
+}
+
+int ctl_daw_level_msg(uint8_t *out, int row, int fine)
+{
+    out[0] = 0xF0; out[1] = 0x7D; out[2] = 0x4F; out[3] = 0x52; out[4] = 0x43; out[5] = 0x1D;
+    out[6] = (uint8_t)(row & 0x7F); out[7] = (uint8_t)((fine >> 7) & 0x7F); out[8] = (uint8_t)(fine & 0x7F); out[9] = 0xF7;
+    return CTL_DAW_LEVEL_LEN;
+}
+
+int ctl_daw_bank_msg(uint8_t *out, int dir, int count)
+{
+    out[0] = 0xF0; out[1] = 0x7D; out[2] = 0x4F; out[3] = 0x52; out[4] = 0x43; out[5] = 0x1E;
+    out[6] = (uint8_t)(dir > 0 ? 1 : 0); out[7] = (uint8_t)(count < 1 ? 1 : count > 127 ? 127 : count); out[8] = 0xF7;
+    return CTL_DAW_BANK_LEN;
 }
 
 /* ---- the roller / looper (v0.29) ---- */

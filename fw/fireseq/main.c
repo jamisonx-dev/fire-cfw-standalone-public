@@ -12,6 +12,17 @@
  *   KNOB MODE button  step knob page 2 (MIXER lit): knob 1 condition, 2 lock value, 3 chord (melodic)
  *   hold row + knob 3 that track's lock CC;  hold PERFORM = FILL (for FILL conditions)
  *   tap PERFORM       FADERS: up to 32 CC faders, 4 rows at a time, each its own CC / channel / colour
+ *   tap NOTE again    UNIVERSAL (v0.31; v0.38 moved here from PERFORM x2; NOTE again = back): 8 pages of pads + knobs stored ON THE FIRE (uni.h), set up from
+ *                     the ORC web page (host 10-15) or here. GRID < > page; KNOB MODE = knob bank 1-4; SHIFT held = each
+ *                     pad's SHIFT assignment (UNI_LAYER_BTN). Editing (UNI_EDIT_BTN = ALT held):
+ *     ALT + tap pad   edit it (it plays, so you hear it); + SHIFT = its SHIFT assignment. Knobs: 1 type, 2 channel,
+ *                     3 number, 4 value; KNOB MODE = page 2: 1 off value, 2 colour. Type "off" = clear it.
+ *     ALT + hold A, tap B  copy pad A to pad B;   ALT + turn a knob = edit that knob (1 type, 2 ch, 3 CC, 4 start)
+ *     let ALT go      done: saved like any edit (3 s later; AUTOSAVE off = on SAVE NOW)
+ *   tap PERFORM again the DAW page (v0.31d; v0.38: was the 3rd tap), only while the host has defined one (1A-1C): up to 9 rows (8 tracks +
+ *                     master) with the host's colours + names, played EXACTLY like FADERS (tap, knobs 1-4, SELECT /
+ *                     SHIFT + PATTERN scroll); moves go to the host as 1D, scrolling past the ends asks for another bank
+ *                     (1E). RAM only. Row buttons do nothing there. A 3rd tap (or the host removing it) = back; no DAW page = the 2nd tap is back.
  *   GRID < >          step page (1-16, 17-32 ... 113-128)
  *   SELECT turn       scroll tracks one row        SHIFT + SELECT: tempo (SHIFT+ALT: x10)
  *   SHIFT + PATTERN   scroll tracks a page (4 rows)
@@ -46,10 +57,14 @@
 #include "store.h"                                  /* legacy (v1/v2) format: migration only */
 #include "steps.h"
 #include "play.h"
-#include "lights.h"
 #include "screens.h"
 #include "crash.h"
 #include "ctl.h"                                    /* the control decisions (tested on the host: ctl_test.c) */
+#include "uni.h"                                    /* v0.31 UNIVERSAL mode logic (uni_test.c) */
+#include "compact.h"                                /* v0.31 the save area clean-up (compact_test.c) */
+#include "hostm.h"                                  /* v0.33 ORC mode = host mode (hostm_test.c) */
+#include "daw.h"                                    /* v0.36 DAW mode: Mackie Control / HUI (daw_test.c) */
+#include "paint.h"                                  /* v0.37 PAINT mode (paint_test.c) */
 
 /* noinline on the functions main() calls that own buffers or parse input (render, draw_*, host_cmd, midi_*,
    handle_events, paint): main() never returns, so anything inlined into it is never canary-checked
@@ -61,7 +76,11 @@
 #define BUILD_ID_STR "00000000"
 #endif
 __attribute__((used)) static const char BUILD_TAG[] = "ORCBUILD=" BUILD_ID_STR;
+/* The release name BROWSER > About shows (v0.35, 2026-11-12: a tester's photo of that page says which build they run).
+   Bump it with every release; the build id above changes by itself. */
+#define FW_VERSION "v0.39"
 #include <math.h>
+#include <stddef.h>
 
 #define DTRACKS 16                                  /* drum tracks T1-T16: one note per track */
 #define MTRACKS 8                                   /* melodic tracks M1-M8 (tracks 16-23): a note per step */
@@ -193,6 +212,23 @@ void __attribute__((noreturn, used)) __stack_chk_fail(void)
     NVIC_SystemReset();
 }
 
+/* v0.29d diagnostic: TIM4's own stack check failed (fire_hw.c, kinds in fire_hw.h). Recorded like a fault, but with
+   the fields reused: PC / LR / xPSR = the INTERRUPTED code's (from the frame at TIM4's entry SP), CFSR = the kind,
+   HFSR = TIM4's SP as it started, addr = TIM4's entry SP, SP = TIM4's SP now. The snapshot starts at the lower of the
+   two SPs, so it holds TIM4's own frame and the interrupted code's frame above it. */
+void __attribute__((noreturn, used)) tim4_slip(uint32_t kind, uint32_t sp_in, uint32_t sp0, uint32_t sp_now)
+{
+    __disable_irq();
+    bk_enable();
+    const volatile uint32_t *f = (const volatile uint32_t *)sp_in;
+    bool dfu;
+    crash_record(CRASH_SLIP, f[6], f[5], f[7], kind, sp0, sp_in, ms_ticks, RTC->BKP2R, &dfu);
+    RTC->BKP15R = sp_now; RTC->BKP16R = stack_low();
+    snap_take((const uint32_t *)(sp_now < sp0 ? sp_now : sp0));
+    RTC->BKP0R = dfu ? 1u : 0u;
+    NVIC_SystemReset();
+}
+
 /* The handlers read which stack the fault came from, hand its frame (R0-R3, R12, LR, PC, xPSR) to crash_from_fault. */
 #define CRASH_VECTOR(name, cause) \
     void __attribute__((naked)) name(void) \
@@ -218,7 +254,9 @@ static void clock_init(void)
     while (!(RCC->CR & RCC_CR_HSERDY)) {}
     RCC->APB1ENR |= RCC_APB1ENR_PWREN;
     PWR->CR = (PWR->CR & ~PWR_CR_VOS) | PWR_CR_VOS_1;
-    FLASH->ACR = FLASH_ACR_LATENCY_2WS | FLASH_ACR_PRFTEN | FLASH_ACR_ICEN | FLASH_ACR_DCEN;
+    /* v0.33b: 3 wait states (was 2). 2 is only in spec at 84 MHz while VDD stays above 2.7 V, with no margin, and the
+       2026-11-11 crashes were an instruction fetched with one bit wrong (crash.h T4V_ENTRY). More is always legal. */
+    FLASH->ACR = FLASH_ACR_LATENCY_3WS | FLASH_ACR_PRFTEN | FLASH_ACR_ICEN | FLASH_ACR_DCEN;
     RCC->PLLCFGR = 0x07415408u;
     RCC->CR |= RCC_CR_PLLON;
     while (!(RCC->CR & RCC_CR_PLLRDY)) {}
@@ -292,9 +330,9 @@ typedef struct {
     uint8_t fad_cc[32], fad_ch[32], fad_col[32], fad_val[32];   /* CC 0-127, channel 1-16, colour 0-15, value 0-127 */
     /* v0.15: lights + menu (taken from the reserved bytes: an older save reads lt_init 0 -> defaults) */
     uint8_t lt_init;                                /* 1 = the lights settings below have been set up */
-    uint8_t lt_mode;                                /* 0-12 = that effect, 13 = CYCLE */
-    uint8_t lt_speed;                               /* 0-127, 64 = x1 (2^((v-64)/32): x0.25 .. x4) */
-    uint8_t lt_idle;                                /* index into LT_IDLE_S: when the pads go to lights on their own */
+    uint8_t lt_mode;                                /* (unused since v0.31r: the shows are gone; kept so the save layout never moves) */
+    uint8_t lt_speed;                               /* (unused since v0.31r, ditto) */
+    uint8_t lt_idle;                                /* (unused since v0.31r: nothing starts by itself) */
     uint8_t lt_smooth;                              /* 1 = temporal dithering between pad levels */
     uint8_t autosave_off;                           /* 1 = nothing saves until SAVE NOW (menu) */
     uint8_t lt_bars;                                /* VU bar look: 0 snappy, 1 smooth, 2 whole, 3 heat, 4 heat smooth (0 = what an older save reads) */
@@ -302,7 +340,8 @@ typedef struct {
     uint8_t lt_idle_v18;                            /* v0.18: 1 = Idle start was switched OFF once (the owner never wanted the screen saver) */
     uint8_t pad_hold;                               /* v0.28: index into PAD_HOLD_MS, how long a live pad must stay up before its release counts */
     uint8_t pad_hold_v28;                           /* v0.28: 1 = pad_hold has been set up (an older save reads 0 -> the default) */
-    uint8_t reserved3[3];
+    uint8_t daw_proto;                              /* v0.36: DAW mode's protocol, DAW_AUTO / DAW_MCU / DAW_HUI (0 = auto) */
+    uint8_t reserved3[2];
     /* v0.14: 32 patterns, each with a colour (appended) */
     uint8_t pat_col[32];                            /* colour 0-15 + 1, 0 = default (pattern number mod 16) */
     /* v0.20 (appended: an older save reads zeros = exactly the old behaviour) */
@@ -328,18 +367,40 @@ typedef struct {
     uint8_t kbx_bank[3];
     uint8_t kbx_fn[3][4][4], kbx_ch[3][4][4], kbx_abs[3][4][4];
     uint8_t kbx_init;
+    /* v0.31 (appended: an older save reads zeros = page 1, bank 1): UNIVERSAL mode's page (0-7) and knob bank (0-3) */
+    uint8_t uni_page, uni_bank;
 } global_t;
 
 _Static_assert(TRACKS == ST_TRACKS && DTRACKS == ST_MEL_FIRST && DTRACKS + MTRACKS == ST_MEL_END && TRACKS_V28 == ST_TRACKS_V2
                && PATTERNS == ST_PATTERNS && MAXSTEPS == ST_MAXSTEPS, "steps.h sizes");
 _Static_assert(ST_REC_HDR + ST_POOL <= S2_MAX_RECORD, "a pattern must fit one save record");
-_Static_assert(sizeof(global_t) == 566, "global_t changed size: only APPEND fields (older saves zero-fill)");
+_Static_assert(sizeof(global_t) == 568,"global_t changed size: only APPEND fields (older saves zero-fill)");
 static global_t G;
 static global_t G_saved;                            /* what the newest global record holds (skip identical saves) */
 static global_t G_snap;                             /* the settings record being written: a copy, so edits never tear it */
 static uint32_t saving_size;                        /* pool bytes of the pattern being written (-> steps_saved when done) */
 static uint32_t pat_stuck;                          /* bit p: pattern p's saved record didn't fit at boot: never overwrite it */
 #define KIND_PAT(p) (17 + (p))                      /* pattern records (steps.c v2, self-describing) */
+#define KIND_UNI(p) (49 + (p))                      /* v0.31: UNIVERSAL pages 0-7 (uni.h), kinds 49-56 */
+#define IS_KIND_PAT(k) ((k) >= KIND_PAT(0) && (k) < KIND_PAT(PATTERNS))
+#define IS_KIND_UNI(k) ((k) >= KIND_UNI(0) && (k) < KIND_UNI(UNI_PAGES))
+_Static_assert(KIND_UNI(UNI_PAGES) <= S2_KINDS && KIND_UNI(0) == KIND_PAT(PATTERNS), "store2 kinds");
+#define KIND_PAINT(s) (57 + (s))                    /* v0.37: PAINT mode's saved paintings 0-3, kinds 57-60 */
+#define IS_KIND_PAINT(k) ((k) >= KIND_PAINT(0) && (k) < KIND_PAINT(PAINT_SLOTS))
+#define KIND_CRASH 61                               /* v0.39: the last crash, kept in flash through a power-off */
+_Static_assert(KIND_PAINT(0) == KIND_UNI(UNI_PAGES) && KIND_PAINT(PAINT_SLOTS) <= S2_KINDS, "store2 paint kinds");
+/* v0.37 PAINT mode (paint.h). The canvas lives in RAM until power-off; the four saved paintings are mirrored in RAM too,
+   so the save area's clean-up (compact.c) can write them back without borrowing scratch (its scratch is full of pages). */
+static bool paintm;                                 /* PAINT mode is on */
+static uint8_t paint_cur = 1;                       /* the picked colour (red) */
+static uint8_t paint_cv[PAINT_LEN];                 /* the canvas */
+static uint8_t paint_saved[PAINT_SLOTS][PAINT_LEN]; /* the saved paintings, as in flash */
+static uint8_t paint_has;                           /* bit s: slot s holds a painting */
+static uint8_t paint_pend;                          /* bit s: slot s waits to be written to flash */
+static paint_btn_t paint_b = {-1, 0, 0};            /* the row button being held */
+static void pm_paint(void);
+static void pm_screen(void);
+static bool uni_dirty(void);                        /* (UNIVERSAL section, below) */
 #define KIND_PAT_V1(p) (9 + (p))                    /* v0.10's sparse records; kinds 1-8 = the old full-size ones */
 static uint32_t pat_dirty;                          /* bit p = pattern p needs saving */
 static bool global_dirty;
@@ -488,7 +549,9 @@ static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
 
 /* ---------- runtime state ---------- */
 
+static uint32_t loop_last_us, loop_max_us;          /* v0.31: the main loop's longest pass (us), reported by 07 */
 static int queued_pat = -1;                         /* pattern (or, in song mode, slot) to switch to at the bar */
+static bool bar_msgs;                               /* v0.30: host 0E 01 = send 0F at each bar start (off at power-on) */
 #define SLOTS 16
 static bool song_edit;                              /* song editor on the pads */
 static bool trkvol;                                 /* v0.23: STEP pressed again = one volume fader per track (4 rows) instead of the steps */
@@ -506,6 +569,12 @@ static int clock_k = 6;
 static bool ext_clock, ext_playing;
 static uint32_t ext_last_ms, ext_ticks;
 static char status_line[22] = "";
+/* v0.37d: a BRIEF message ("DAW off", "paint off") clears itself after BRIEF_MS, unless another message replaced it.
+   Every other message still stays until replaced (warnings like FULL / save first must not vanish). the owner 2026-11-13:
+   "DAW off" stayed for good and hid UNIVERSAL's page name, so the header read "Univ DAW off". */
+#define BRIEF_MS 2000u
+static uint32_t brief_until;                        /* ms_ticks the brief message goes (0 = none) */
+static const char *brief_msg;                       /* the brief message's text (a string literal) */
 static int held_row = -1, held_row_t = -1;          /* row button held, and the track it was on when pressed */
 static int held_pad = -1;                           /* the step pad being held (its pad number), and where it was: */
 static int hold_view, hold_page, hold_pat;          /* if the view, page or pattern moves, the hold is dropped */
@@ -520,48 +589,46 @@ static bool save_waiting_compact;
 static int saving_kind = -1;                        /* record being written, -1 none */
 static bool save_run;                               /* a save pass is in progress */
 static bool dirty = true, dfu_requested;
+/* v0.37d: m = a string literal, shorter than status_line */
+static void status_brief(const char *m)
+{
+    strcpy(status_line, m);
+    brief_msg = m;
+    brief_until = ms_ticks + BRIEF_MS; if (!brief_until) brief_until = 1;
+    dirty = true;
+}
+/* main loop: the brief message's time is up -> gone, if still on screen */
+static void status_brief_tick(void)
+{
+    if (!brief_until || (int32_t)(ms_ticks - brief_until) < 0) return;
+    brief_until = 0;
+    if (brief_msg && !strcmp(status_line, brief_msg)) { status_line[0] = 0; dirty = true; }
+}
 static bool save_force;                             /* save even with AUTOSAVE off (SAVE NOW, or the setting itself) */
 static bool save_forced_run;                        /* the running save was a forced one (a retry / re-arm stays forced) */
 static uint32_t save_lazy_due;                      /* settings changed while stopped: saved when this is due (0 = none) */
 static uint8_t saves_global;                        /* settings records written since boot (mod 128; host status 07) */
 
-/* pad light shows + the BROWSER menu (state; the code is below, after the text helpers) */
-static bool lt_on;                                  /* a show owns the pads */
-static bool lt_manual;                              /* started by hand / by the host: not ended by PLAY, no idle rules */
-static bool lt_host;                                /* the host drives it (mode HOST) */
-static bool lt_by_host;                             /* the host started what is showing (02 01 / 04 / 05): its 02 00 ends it */
-static bool lt_pinned;                              /* an effect / text the host asked for: CYCLE leaves it alone */
-static float lt_t;                                  /* effect time */
-static uint32_t lt_last_us, lt_input_ms, lt_host_ms, lt_cycle_ms;
-static int lt_cur, lt_slice;                        /* effect showing; next column group of the frame being built */
-static unsigned lt_frame;
-static uint64_t lt_eat;                             /* pads whose press only woke the pads up: their release is ignored too */
-static uint8_t lt_stage[LT_ROWS * LT_COLS][3];
+/* the PI VU bars + the BROWSER menu (state; the code is below, after the text helpers) */
+/* v0.36: the PI VU bars are gone (the owner 2026-11-12, to make room for DAW mode; orc1-firevu was already off). The
+   G.lt_* save bytes stay where they are (the save layout never changes) and are simply unused. */
 static bool menu_on, menu_edit;
 static int pop_kind;                                /* a big-number popup after a change: 1 tempo, 2 swing */
 static uint32_t pop_ms;
 static int menu_sel, menu_grp;                      /* the selected row, and which menu page is open (0 = the top) */
 static char menu_toast[22];
 static uint32_t menu_toast_ms;
-static const uint16_t LT_IDLE_S[6] = {0, 15, 30, 60, 120, 300};   /* lt_idle index -> seconds, 0 = off */
 
 /* live play */
-enum { MODE_STEP, MODE_NOTE, MODE_DRUM, MODE_FADER };
+enum { MODE_STEP, MODE_NOTE, MODE_DRUM, MODE_FADER, MODE_UNI, MODE_DAW };   /* MODE_DAW = v0.31d the host's DAW page */
 static int mode = MODE_STEP;
 #define LIVE_VEL 100
 #define LIVE_ACCENT 127
 #define KB_SPAN 31                                  /* NOTE mode: 16 columns + 3 rows a fourth apart */
-static struct { uint8_t note, chan; bool keys, on, sx, cc; } live[64];   /* what each pad's press sent, so its release matches (sx = a surface SysEx, cc = an MPC panel CC, not a note) */
-/* SURFACE (v0.19): the ORC draws its own controls. Pads show the colours the host set (0A); a held pad shows brighter.
-   The host turns it on (0B 01 <x>); any mode button (STEP / NOTE / DRUM / PERFORM, SHIFT + PATTERN) or 0B 00 turns it
-   off. The sequencer keeps running underneath. Not saved.
-   v0.21 (the owner: "they recognise each other, they can just talk however"): a surface pad is NOT a MIDI note any more,
-   so it takes no channel from the sequencer, the ORC or the gear: press / release = F0 7D 'ORC' 0C <pad 0-63> <vel> F7
-   (release vel 0). 0B's second byte (once the channel) is still accepted and ignored. */
-static bool surface_on;
-static uint8_t surf_ch;                             /* 0-15: what 0B's second byte said (reported by 07; unused since v0.21) */
-static bool surf_known;                             /* the host has set up a surface since boot (BROWSER > ORC surface can bring it back) */
-static uint8_t surf_rgb[64][3];                     /* levels 0-7, as the host sent them */
+static struct { uint8_t note, chan; bool keys, on, cc; uint8_t off; } live[64];   /* what each pad's press sent, so its release matches (cc = a CC, not a note: its release sends CC note = off) */
+/* v0.36: the ORC pads page (the 0A / 0B pad surface, v0.19-v0.35) is gone (the owner 2026-11-12: "an orc page that does
+   nothing"; ORC mode replaced it). 0A / 0B are still accepted and ignored so an older ORC does no harm; 07 reports 0, 0
+   where it reported the surface. Its RAM (colours 192 B + a flag per pad) went to DAW mode. */
 static uint8_t notes_held[128];                     /* NOTE mode: pads holding each note (a note can sit on 2 pads) */
 static int grid_sel;                                /* DRUM mode: grid being edited (ALT + tap a grid) */
 static uint8_t m_cur[MTRACKS] = {60, 60, 60, 60, 60, 60, 60, 60};   /* the note a newly lit melodic step gets */
@@ -572,6 +639,37 @@ static uint32_t ext_step_at, ext_even_at, ext_step_len;   /* external clock: las
 #define MAXFADERS 32
 static int fad_top;                                 /* first visible fader */
 static int mode_before_faders = MODE_STEP;          /* where a tap on PERFORM goes back to */
+/* v0.31d: the DAW page = a second FADER SET the host defines (1A / 1B / 1C), RAM only, never saved. The fader code (pads,
+   knobs 1-4, scrolling, the screen) works on the set on screen: fset() = the saved FADERS (G.fad_*) or the DAW page. Only
+   what a level change sends (FADERS: its CC + the lazy save; the DAW page: 1D to the host), the colours / names and the
+   row-button gestures (FADERS only) differ. */
+static ctl_daw_t daw;
+/* v0.36 DAW MODE: the Fire as a Mackie Control / HUI surface for a computer's DAW, on its own USB port (cable 1, "FLAME
+   DAW"). BROWSER > MCU/HUI/DAW enters, SHIFT + BROWSER leaves; the sequencer keeps playing underneath on its own port.
+   FADER view = the DAW page's rows (the same code: 16-pad level bars, knobs fine, SELECT scrolls), fed and read by the
+   DAW instead of the Pi. BUTTON view = 8 strips x 2 pads, rows REC / SOLO / MUTE / SELECT, knobs = V-pots.
+   STEP = buttons, PERFORM = faders, PLAY / STOP / REC = the DAW's transport, PATTERN = bank of 8, GRID = one track. */
+static bool dawm;                                   /* DAW mode is on */
+static uint8_t dawm_view;                           /* 0 = faders, 1 = buttons */
+static uint8_t dawm_half;                           /* button view: the knobs are strips 1-4 (0) or 5-8 (1); SELECT push swaps */
+static uint32_t dawm_seen;                          /* ms_ticks the DAW last said something (0 = not yet) */
+static uint16_t dawm_lvl[DAW_STRIPS];               /* v0.36b: the DAW's last level per strip, kept while out of DAW mode */
+static uint8_t dawm_proto_seen;                     /* v0.38b: the protocol the rows were last laid out for */
+static uint8_t dawm_held[IN_COUNT];                 /* v0.38b: the DAW button each input's press sent (id + 1): its release
+                                                       goes to THAT button even after a view change, a scroll or leaving */
+static void paint_dawm(void);
+static void draw_dawm_screen(void);
+static int daw_top;                                 /* first visible DAW row */
+static ctl_daw_t pi_page;                           /* v0.37c: the Pi's DAW page, kept aside while DAW mode uses `daw` (136 B) */
+static int pi_top;                                  /* v0.37c: its first visible row */
+typedef struct { uint8_t *val; int n; int *top; bool daw; } fset_t;
+static fset_t fset(void)
+{
+    fset_t s = {G.fad_val, G.fad_n, &fad_top, false};
+    if (mode == MODE_DAW) { s.val = daw.val; s.n = daw.n; s.top = &daw_top; s.daw = true; }
+    return s;
+}
+static bool fader_mode(void) { return mode == MODE_FADER || mode == MODE_DAW; }
 static uint32_t perform_down_ms;                    /* a short press of PERFORM = faders, a hold = FILL */
 static const uint8_t FAD_RGB[16][3] = {             /* fader colours, R,G,B brightness 0-7 */
     {7, 0, 0}, {7, 2, 0}, {7, 4, 0}, {6, 6, 0}, {3, 7, 0}, {0, 7, 0}, {0, 7, 3}, {0, 6, 5},
@@ -703,7 +801,7 @@ static void touched_pattern(int p)
 static void commit_pending(void)
 {
     save_lazy_due = 0;
-    if ((global_dirty || (pat_dirty & ~pat_stuck)) && !save_due && !save_run) save_soon();
+    if ((global_dirty || (pat_dirty & ~pat_stuck) || uni_dirty()) && !save_due && !save_run) save_soon();
 }
 static void pool_full(void) { memcpy(status_line, "full", 5); dirty = true; }   /* the step pool is out of room */
 
@@ -753,12 +851,272 @@ static void midi_send1(uint8_t a)
     const uint8_t pkt[4] = {0x0F, a, 0, 0};
     tud_midi_packet_write(pkt);
 }
-/* v0.21: a surface pad press (vel 1-127) / release (0), as SysEx */
-static void surf_send(int pad, uint8_t vel)
+
+/* ---------- UNIVERSAL mode (v0.31): pages of pads + knobs stored ON THE FIRE (uni.h) ----------
+   The pages live in flash only (store2 kinds 49-56; RAM has no room for them). An edit made on the Fire is a PATCH slot
+   in RAM (uni_ps) that the pads use at once; the saver writes the page with its patches applied, read through a cursor
+   (O(1) per flash word). A host write streams into flash as the chunks arrive (uw, uni_poll). Knob values, toggle
+   states and latched notes are RAM only (not saved). Every lookup the main loop makes is O(1) (the index) or a cached
+   number (uni_cache): nothing here walks a page per word, per pad or per knob detent (review 2026-10-27). */
+#define UNI_LAYER_BTN IN_SHIFT                      /* held = each pad's second assignment (the owner: one constant, so ALT is a one-line change) */
+#define UNI_EDIT_BTN IN_ALT                         /* held = edit what you touch */
+#define UNI_ALL ((1u << US_EDIT) | (1u << US_PEND) | (1u << US_SAVE))
+static const uint8_t UNI_EMPTY[UNI_HDR] = {UNI_VER, ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+static const int UNI_ID[UNI_PAGES] = {0, 1, 2, 3, 4, 5, 6, 7};
+static uni_patch_t uni_ps[UNI_SLOTS];               /* edits made on the Fire, until saved */
+static uint8_t uni_ix[UNI_KEYS];                    /* entry number of every key (base, SHIFT, knob) in the page uni_ix_* was built from */
+static const uint8_t *uni_ix_rec; static uint32_t uni_ix_len, uni_ix_gen; static int uni_ix_page = -1;
+static uint32_t uni_gen;                            /* +1 on every page record written and every compaction (the index rebuilds) */
+static uint16_t uni_pver[UNI_PAGES];                /* +1 when a page's record or its edits change (its cached numbers are redone) */
+static struct { uint16_t ver, len, sum, stored; bool ok; } uni_cache[UNI_PAGES];   /* per page: with its edits / as stored */
+static uni_cur_t uni_wcur;                          /* the saver's cursor over the page it is writing */
+static uint8_t uni_kv[UNI_PAGES][UNI_KNOBS];        /* knob values (RAM: at power-on each knob starts at its start value) */
+static uint64_t uni_tog[UNI_PAGES][2];              /* CC toggle pads that are on, per layer (RAM: off at power-on) */
+static uni_latch_t uni_lat[UNI_LATCH_MAX];          /* latched notes: what each latched pad SENT (current page only) */
+static uint64_t uni_held;                           /* held pads whose release sends nothing (lit while held) */
+static int uni_ed, uni_ed_idx, uni_ed_layer, uni_ed_kpage;   /* on-Fire edit: uni_ed 0 none, 1 a pad, 2 a knob */
+static int uni_copy_src = -1;                       /* ALT + a pad held: tapping another pad copies it there */
+static int uni_last_knob = -1;                      /* the knob slot turned last (marked on the screen) */
+static struct {                                     /* a host page write (10 / 11 / 12) or clear (15) */
+    uint8_t state, page, ack;                       /* state 0 idle, 1 receiving chunks, 2 committing; ack = the command to answer */
+    bool gen;                                       /* the clear: the payload is the empty page */
+    uint16_t len, done, cbase, clen;                /* done = payload bytes in flash; the chunk in RAM covers cbase .. +clen */
+    uint32_t last_ms;
+    uint8_t chunk[UNI_CHUNK];
+} uw;
+static char *cat(char *o, const char *str);
+static bool compact_all(void);
+static void midi_sendn(const uint8_t *m, int n) { if (n && tud_midi_mounted()) tud_midi_stream_write(0, m, (uint32_t)n); }
+
+/* the stored page (0 = none, or a version this firmware doesn't know) */
+static const uint8_t *uni_base(int page, uint32_t *len)
+{
+    const uint8_t *r = store2_ptr(KIND_UNI(page), len);
+    if (r && uni_len_ok(*len) && r[0] == UNI_VER) return r;
+    *len = 0;
+    return 0;
+}
+static int uni_slot(int page, int key)
+{
+    for (int i = 0; i < UNI_SLOTS; i++) if (uni_ps[i].state != US_FREE && uni_ps[i].page == page && uni_ps[i].key == key) return i;
+    return -1;
+}
+static bool uni_has_slots(int page, unsigned mask)
+{
+    for (int i = 0; i < UNI_SLOTS; i++) if (uni_ps[i].state != US_FREE && uni_ps[i].page == page && (mask >> uni_ps[i].state & 1)) return true;
+    return false;
+}
+/* The entry that counts for (page, key): an edit not saved yet, else the stored page, by the index (O(1) for every key,
+   SHIFT ones too: the pads repaint every pass). The index follows the page asked for. */
+static const uint8_t *uni_entry(int page, int key)
+{
+    int s = uni_slot(page, key);
+    if (s >= 0) return uni_ps[s].del ? 0 : uni_ps[s].e;
+    uint32_t len;
+    const uint8_t *r = uni_base(page, &len);
+    if (!r || key < 0 || key >= UNI_KEYS) return 0;
+    if (page != uni_ix_page || r != uni_ix_rec || len != uni_ix_len || uni_gen != uni_ix_gen) {   /* (re)build the index */
+        uni_index(r, len, uni_ix);
+        uni_ix_page = page; uni_ix_rec = r; uni_ix_len = len; uni_ix_gen = uni_gen;
+    }
+    return uni_ix[key] == 255 ? 0 : r + UNI_HDR + UNI_ENT * (uint32_t)uni_ix[key];
+}
+/* a pad's assignment on a layer; a SHIFT press on a pad with no SHIFT assignment plays its base one (*layer = which) */
+static bool uni_pad_get(int page, int pad, int *layer, uni_pad_t *p)
+{
+    const uint8_t *e = *layer ? uni_entry(page, uni_pad_key(pad, UL_SHIFT)) : 0;
+    if (!e) { *layer = UL_BASE; e = uni_entry(page, uni_pad_key(pad, UL_BASE)); }
+    if (!e) return false;
+    *p = uni_pad_of(e);
+    return true;
+}
+static bool uni_knob_get(int page, int slot, uni_knob_t *k)
+{
+    const uint8_t *e = uni_entry(page, uni_knob_key(slot));
+    if (!e) return false;
+    *k = uni_knob_of(e);
+    return k->type != UK_NONE;
+}
+/* latched notes off: exactly what each latched pad sent (pad < 0: all of them) */
+static void uni_latch_off(int pad)
+{
+    uint8_t m[3 * UNI_LATCH_MAX];
+    int n = uni_latch_release(uni_lat, pad, m, sizeof m);
+    if (n) { midi_sendn(m, n); dirty = true; }
+}
+static void uni_values_reset(int page)              /* knobs to their start values, toggles off (a host rewrote the page) */
+{
+    for (int s = 0; s < UNI_KNOBS; s++) { uni_knob_t k; uni_kv[page][s] = uni_knob_get(page, s, &k) ? k.init : 64; }
+    uni_tog[page][0] = uni_tog[page][1] = 0;
+}
+static void uni_touch(int page) { uni_pver[page]++; dirty = true; }   /* its cached numbers are redone when next asked */
+/* a page's length + checksum with its edits, and as stored: one pass (uni_patched_*), only when the page changed */
+static void uni_cached(int page)
+{
+    if (uni_cache[page].ok && uni_cache[page].ver == uni_pver[page]) return;
+    uint32_t bl;
+    const uint8_t *b = uni_base(page, &bl);
+    uni_cache[page].len = (uint16_t)uni_patched_len(b, bl, uni_ps, UNI_SLOTS, page, UNI_ALL);
+    uni_cache[page].sum = uni_patched_sum(b, bl, uni_ps, UNI_SLOTS, page, UNI_ALL);
+    uni_cache[page].stored = (uint16_t)bl;
+    uni_cache[page].ver = uni_pver[page]; uni_cache[page].ok = true;
+}
+/* bytes a page takes in the budget: the largest of what is stored, what it will be with its edits, and a host write of
+   it under way (a Fire edit elsewhere must not take the room that write was promised: review 2026-10-27) */
+static uint32_t uni_size(int page)
+{
+    uni_cached(page);
+    uint32_t s = uni_cache[page].stored;
+    if (s || uni_has_slots(page, UNI_ALL)) s = uni_cache[page].len > s ? uni_cache[page].len : s;
+    if (uw.state && uw.page == page && uw.len > s) s = uw.len;
+    return s;
+}
+static uint32_t uni_used_others(int page) { uint32_t u = 0; for (int p = 0; p < UNI_PAGES; p++) if (p != page) u += uni_size(p); return u; }
+static bool uni_dirty(void) { for (int i = 0; i < UNI_SLOTS; i++) if (uni_ps[i].state == US_PEND) return true; return false; }
+static bool uni_unsaved(void) { for (int i = 0; i < UNI_SLOTS; i++) if (uni_ps[i].state != US_FREE) return true; return false; }
+static void uni_slots_state(int page, int from, int to)
+{
+    for (int i = 0; i < UNI_SLOTS; i++) if (uni_ps[i].state == from && uni_ps[i].page == page) uni_ps[i].state = (uint8_t)to;
+    uni_touch(page);
+}
+static void save_soon(void);
+/* an edit to a page the saver is writing: that write never counts, its edits wait for the next save */
+static void uni_save_cancel(int page)
+{
+    if (saving_kind == KIND_UNI(page) && store2_busy_kind() == KIND_UNI(page)) { store2_cancel(); saving_kind = -1; save_run = false; }
+    uni_slots_state(page, US_SAVE, US_PEND);
+    if (!save_due) save_soon();
+}
+/* (page, key) = e, or removed (del), as an edit under way. false = no free slot, or the pages would not fit the budget.
+   A pad that changes ends its latched notes first (with what they sent). */
+static bool uni_set(int page, int key, const uint8_t *e, bool del)
+{
+    int s = uni_slot(page, key);
+    if (s >= 0 && uni_ps[s].state == US_SAVE) uni_save_cancel(page);
+    for (int i = 0; i < UNI_SLOTS && s < 0; i++) if (uni_ps[i].state == US_FREE) s = i;
+    if (s < 0) { cat(status_line, "save first"); dirty = true; return false; }   /* 8 edits waiting (AUTOSAVE off): SAVE NOW */
+    if (page == G.uni_page && key < 2 * UNI_PADS) uni_latch_off(key >> 1);
+    uni_patch_t old = uni_ps[s];
+    uni_ps[s].page = (int8_t)page; uni_ps[s].key = (uint8_t)key; uni_ps[s].del = del; uni_ps[s].state = US_EDIT;
+    if (!del) memcpy(uni_ps[s].e, e, UNI_ENT);
+    uni_touch(page);
+    if (!del && uni_size(page) + uni_used_others(page) > UNI_BUDGET) {
+        uni_ps[s] = old;
+        uni_touch(page);
+        cat(status_line, "pages full"); dirty = true;
+        return false;
+    }
+    return true;
+}
+/* ALT let go (or the edit left): the edits are done, saved like any edit */
+static void uni_edit_end(void)
+{
+    bool any = false;
+    for (int i = 0; i < UNI_SLOTS; i++) if (uni_ps[i].state == US_EDIT) { uni_ps[i].state = US_PEND; any = true; }
+    if (any) save_soon();
+    uni_ed = 0; uni_copy_src = -1; uni_ed_kpage = 0;
+    dirty = true;
+}
+/* a page's unsaved Fire edits are thrown away (the host replaced the page, or they can no longer fit: USER_GUIDE) */
+static void uni_drop_edits(int page, const char *why)
+{
+    if (page == G.uni_page) { uni_latch_off(-1); uni_ed = 0; uni_copy_src = -1; }
+    bool any = false;
+    for (int i = 0; i < UNI_SLOTS; i++) if (uni_ps[i].state != US_FREE && uni_ps[i].page == page) { uni_ps[i].state = US_FREE; any = true; }
+    uni_touch(page);
+    if (any) cat(status_line, why);
+}
+
+/* host write / clear: the answer F0 7D 'ORC' <cmd> <result> <page> <done hi> <done lo> F7 */
+static void uni_ack(int cmd, int res, int page)
 {
     if (!tud_midi_mounted()) return;
-    uint8_t m[9] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, 0x0C, (uint8_t)(pad & 0x3F), (uint8_t)(vel & 0x7F), 0xF7};
+    const uint8_t m[11] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, (uint8_t)cmd, (uint8_t)res, (uint8_t)(page & 0x7F),
+                           (uint8_t)(uw.done >> 7 & 0x7F), (uint8_t)(uw.done & 0x7F), 0xF7};
     tud_midi_stream_write(0, m, sizeof m);
+}
+static void uw_reader(const void *ctx, uint32_t off, uint8_t *dst, uint32_t n)
+{
+    (void)ctx;
+    for (uint32_t i = 0; i < n; i++, off++)
+        dst[i] = uw.gen ? (off < UNI_HDR ? UNI_EMPTY[off] : 0)
+                        : (off >= uw.cbase && off < (uint32_t)uw.cbase + uw.clen) ? uw.chunk[off - uw.cbase] : 0xFF;
+}
+/* claim the space for a page record; no room = compact first (stopped only: it stalls ~1-2 s), else UR_ROOM */
+static int uni_begin_write(int page, uint32_t len)
+{
+    if (store2_begin_src(KIND_UNI(page), len, uw_reader, 0)) return UR_OK;
+    if (playing || ext_playing) return UR_ROOM;
+    if (compact_all() && store2_begin_src(KIND_UNI(page), len, uw_reader, 0)) return UR_OK;
+    return UR_FAIL;
+}
+/* busy = a commit / clear under way, or the writer is someone else's: answered BUSY with nothing touched (review
+   2026-10-27: resetting first let a clear + a begin in one pass commit a 9-byte record of 0xFF) */
+static bool uni_host_busy(void) { return uw.state == 2 || (uw.state == 0 && store2_busy()); }
+static void uni_host_begin(int page, uint32_t len)  /* 10 */
+{
+    if (uni_host_busy()) { uni_ack(0x10, UR_BUSY, page); return; }
+    if (uw.state == 1) { store2_cancel(); uw.state = 0; }   /* a new begin restarts: the old write never counts */
+    uw.done = 0; uw.clen = 0; uw.gen = false;
+    int r = uni_begin_check(page, len, uni_used_others(page));
+    if (r == UR_OK) r = uni_begin_write(page, len);
+    if (r == UR_OK) { uw.state = 1; uw.page = (uint8_t)page; uw.len = (uint16_t)len; uw.cbase = 0; uw.ack = 0x10; uw.last_ms = ms_ticks; }
+    uni_ack(0x10, r, page);
+}
+static void uni_host_chunk(uint32_t off, const uint8_t *d, uint32_t n)   /* 11: answered once the chunk is in flash */
+{
+    int r = uw.state != 1 ? UR_ORDER : uw.clen ? UR_BUSY : uni_chunk_check(off, n, uw.done, uw.len);
+    if (r != UR_OK) { uni_ack(0x11, r, uw.state ? uw.page : 127); return; }
+    memcpy(uw.chunk, d, n); uw.cbase = uw.done; uw.clen = (uint16_t)n; uw.ack = 0x11; uw.last_ms = ms_ticks;
+}
+static void uni_host_commit(uint32_t sum)           /* 12: checked IN FLASH, then the commit word; answered when it counts */
+{
+    int r = (uw.state != 1 || uw.clen || uw.done != uw.len) ? UR_ORDER : UR_OK;
+    if (r == UR_OK) {
+        const uint8_t *pl = store2_busy_payload();
+        r = !pl ? UR_FAIL : uni_sum(pl, uw.len) != sum ? UR_SUM : uni_check(pl, uw.len);
+        if (r != UR_OK) { store2_cancel(); uw.state = 0; }   /* a bad page never counts */
+    }
+    if (r != UR_OK) { uni_ack(0x12, r, uw.page); return; }
+    uw.state = 2; uw.ack = 0x12; uw.last_ms = ms_ticks;
+}
+static void uni_host_clear(int page)                /* 15: the empty page (9 bytes) */
+{
+    if (uni_host_busy()) { uni_ack(0x15, UR_BUSY, page); return; }
+    if (uw.state == 1) { store2_cancel(); uw.state = 0; }
+    uw.done = 0; uw.clen = 0; uw.gen = true;
+    int r = uni_begin_write(page, UNI_HDR);
+    if (r != UR_OK) { uw.gen = false; uni_ack(0x15, r, page); return; }
+    uw.state = 2; uw.page = (uint8_t)page; uw.len = UNI_HDR; uw.done = UNI_HDR; uw.ack = 0x15; uw.last_ms = ms_ticks;
+}
+/* the main loop: a few flash words per quiet moment (like the saver), never more than the host has sent */
+static void uni_poll(bool quiet)
+{
+    if (!uw.state) return;
+    if (!store2_busy()) {                           /* the commit word is in (state 2), or a flash write failed */
+        bool ok = uw.state == 2 && !store2_last_failed();
+        int p = uw.page;
+        uw.state = 0; uw.gen = false;
+        if (ok) {                                   /* the host's page replaces any edit made here (USER_GUIDE) */
+            uni_drop_edits(p, "edits replaced");
+            if (G.uni_page == p) uni_latch_off(-1);
+            uni_gen++;
+            uni_values_reset(p);
+        }
+        uni_touch(p);
+        uni_ack(uw.ack, ok ? UR_OK : UR_FAIL, p);
+        return;
+    }
+    if (uw.state == 1 && ms_ticks - uw.last_ms > 3000) { store2_cancel(); uw.state = 0; uni_touch(uw.page); return; }   /* the host went quiet */
+    if (!quiet) return;
+    uint32_t have = uw.clen ? (uint32_t)uw.cbase + uw.clen : uw.done;
+    uint32_t target = uw.state == 2 ? store2_words_total() : 8u + (have == uw.len ? (have + 3u) / 4u : have / 4u);
+    uint32_t wd = store2_words_done();
+    if (wd < target) store2_step(target - wd > 8 ? 8 : target - wd);
+    if (uw.state == 1 && uw.clen && store2_busy() && store2_words_done() >= target) {
+        uw.done = (uint16_t)(uw.cbase + uw.clen); uw.clen = 0;
+        uni_ack(0x11, UR_OK, uw.page);
+    }
 }
 
 static uint32_t step_us(void) { return 60000000u / (uint32_t)(BPM * 4); }
@@ -834,13 +1192,11 @@ static void play_step(uint32_t g, uint32_t now)
         if (is_cc(t)) {                             /* a CC track: CC <its note> = the step's lock value, else the level's velocity */
             out_cc(ch, tnote(t), v.lock ? (uint8_t)(v.lock - 1) : LEVEL_VEL[lv]);
             flash_ms[t] = ms_ticks ? ms_ticks : 1;
-            lights_hit(t, lv);
             continue;
         }
         uint8_t tvel = (uint8_t)ctl_trk_vel(LEVEL_VEL[lv], trk_level(t));   /* the track's volume fader scales its velocity */
         int nn = play_step_notes(&v, is_mel(t), is_mel(t) ? 0 : tnote(t), ch, *lock_cc_p(t), tvel, &held_notes[t], &OUT, notes);
         flash_ms[t] = ms_ticks ? ms_ticks : 1;
-        lights_hit(t, lv);                          /* the TRACKS light show jumps with the hit */
         if (!nn) { held_since[t] = g; continue; }   /* TIE / SLIDE: held until this track's next note */
         int nr = ctl_roll_hits(roll_c1[t] - 1);     /* a 1/32 - 1/64 roll: that many hits per step, else the step's ratchet */
         if (!nr) nr = step_ratchet(v.b);
@@ -857,6 +1213,10 @@ static void play_step(uint32_t g, uint32_t now)
         }
     }
     batch_flush();
+    if (bar_msgs && tud_midi_mounted()) {           /* v0.30: tell the host a bar starts (after the notes: they go first) */
+        uint8_t bm[CTL_BAR_LEN];
+        if (ctl_bar_msg(bm, g, PAGE, CURPAT, song_active() ? song_slot : CTL_NO_SLOT)) tud_midi_stream_write(0, bm, sizeof bm);
+    }
     has_played = true;
     dirty = true;
 }
@@ -983,6 +1343,30 @@ static void paint_mpcrem(void)
     for (int r = 0; r < VIEW_ROWS; r++) { led_set(LED_ROW_G[r], 0); led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0); }
 }
 
+/* UNIVERSAL: each assigned pad dim in its colour (its base assignment's), bright while held or while a latch / toggle is
+   on (SHIFT held: the SHIFT layer's state); the pad being edited blinks white; unassigned pads dark. */
+static void paint_uni(void)
+{
+    int pg = G.uni_page, want = fire_held(UNI_LAYER_BTN) ? UL_SHIFT : UL_BASE;
+    bool blink = (ms_ticks / 200) & 1;
+    for (int pad = 0; pad < 64; pad++) {
+        int r = pad / 16, c = pad % 16, R = 0, Gn = 0, B = 0, ly = want;
+        uni_pad_t p;
+        if (uni_pad_get(pg, pad, &ly, &p)) {
+            const uint8_t *be = uni_entry(pg, uni_pad_key(pad, UL_BASE));
+            int col = be ? uni_pad_of(be).col : UNI_COL_GREY;
+            const uint8_t *rgb = col < 16 ? FAD_RGB[col] : MR_GREY;
+            bool on = live[pad].on || (uni_held >> pad & 1) || (p.type == UT_LATCH && uni_latch_on(uni_lat, uni_pad_key(pad, ly)))
+                      || (p.type == UT_TOGGLE && (uni_tog[pg][ly] >> pad & 1));
+            int k = on ? 7 : 2;
+            R = (rgb[0] * k + 6) / 7; Gn = (rgb[1] * k + 6) / 7; B = (rgb[2] * k + 6) / 7;
+        }
+        if (uni_ed == 1 && uni_ed_idx == pad && blink) R = Gn = B = 7;
+        led_set(led_pad(r, c, 0), R); led_set(led_pad(r, c, 1), Gn); led_set(led_pad(r, c, 2), B);
+    }
+    for (int r = 0; r < VIEW_ROWS; r++) { led_set(LED_ROW_G[r], 0); led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0); }
+}
+
 /* FADERS: each row a fader in its colour, lit up to its level, dim beyond. The row after the last
    fader (if there's room) shows a dim mark: its row button adds a fader. */
 /* beat / bar mark colours: which channels light (at level 1, or 2 for "both"'s bar mark) */
@@ -990,38 +1374,26 @@ static void paint_mpcrem(void)
 static const uint8_t MARK_RGB[MARK_N][3] = {{0, 0, 1}, {1, 1, 1}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 1}, {0, 1, 1}};
 static const char *const NM_MARKCOL[MARK_N] = {"blue", "white", "red", "green", "yellow", "purple", "cyan"};
 
-static void paint_surface(void)                     /* the host's colours; a held pad brighter (or dim white if it has none) */
-{
-    for (int pad = 0; pad < 64; pad++) {
-        int R = surf_rgb[pad][0], Gn = surf_rgb[pad][1], B = surf_rgb[pad][2];
-        if (live[pad].on) {
-            int mx = R > Gn ? (R > B ? R : B) : (Gn > B ? Gn : B);
-            if (!mx) R = Gn = B = 3;
-            else { R = R * 7 / mx; Gn = Gn * 7 / mx; B = B * 7 / mx; }
-        }
-        int r = pad / 16, c = pad % 16;
-        led_set(led_pad(r, c, 0), R); led_set(led_pad(r, c, 1), Gn); led_set(led_pad(r, c, 2), B);
-    }
-    for (int r = 0; r < VIEW_ROWS; r++) { led_set(LED_ROW_G[r], 0); led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0); }
-}
-
+/* the set on screen (fset): the saved FADERS or (v0.31d) the DAW page */
 static void paint_faders(void)
 {
+    fset_t s = fset();
     for (int r = 0; r < VIEW_ROWS; r++) {
-        int f = fad_top + r;
+        int f = *s.top + r;
+        bool add = !s.daw && f == s.n;              /* FADERS' "+ add" row (the DAW page has none) */
         for (int c = 0; c < PAGE; c++) {
             int R = 0, Gn = 0, B = 0;
-            if (f < G.fad_n) {
-                const uint8_t *rgb = FAD_RGB[G.fad_col[f] & 15];
-                int pst = ctl_fader_pad(c, G.fad_val[f]);       /* bright up to the level's tip pad, the tip dim, dark above */
+            if (f < s.n) {
+                const uint8_t *rgb = s.daw ? daw.rgb[f] : FAD_RGB[G.fad_col[f] & 15];
+                int pst = ctl_fader_pad(c, s.val[f]);           /* bright up to the level's tip pad, the tip dim, dark above */
                 if (pst == 2) { R = rgb[0]; Gn = rgb[1]; B = rgb[2]; }
                 else if (pst == 1) { R = rgb[0] ? 1 : 0; Gn = rgb[1] ? 1 : 0; B = rgb[2] ? 1 : 0; }
-            } else if (f == G.fad_n && c == 0) R = Gn = B = 1;   /* "+": add a fader here */
+            } else if (add && c == 0) R = Gn = B = 1;   /* "+": add a fader here */
             led_set(led_pad(r, c, 0), R);
             led_set(led_pad(r, c, 1), Gn);
             led_set(led_pad(r, c, 2), B);
         }
-        led_set(LED_ROW_G[r], held_row == r ? 7 : (f < G.fad_n ? 3 : f == G.fad_n ? 1 : 0));
+        led_set(LED_ROW_G[r], !s.daw && held_row == r ? 7 : (f < s.n ? 3 : add ? 1 : 0));
         led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0);
     }
 }
@@ -1098,11 +1470,13 @@ static void paint_picker(void)
 
 static void __attribute__((noinline)) paint(void)
 {
+    if (paintm) { pm_paint(); return; }             /* v0.37 PAINT mode owns every light */
     bool run = playing || ext_playing;
-    if (surface_on) paint_surface();
+    if (dawm && dawm_view) paint_dawm();             /* v0.36 DAW mode's button view */
     else if (picker_on()) paint_picker();
     else if (roll_shown()) paint_roller();
-    else if (mode == MODE_FADER) paint_faders();
+    else if (fader_mode()) paint_faders();        /* FADERS or the DAW page */
+    else if (mode == MODE_UNI) paint_uni();
     else if (mode == MODE_NOTE) paint_keys();
     else if (mode == MODE_DRUM && mpcrem) paint_mpcrem();
     else if (mode == MODE_DRUM) paint_drums();
@@ -1155,22 +1529,32 @@ static void __attribute__((noinline)) paint(void)
     led_set(LED_SHIFT_Y, fire_held(IN_SHIFT) ? 7 : 1);
     led_set(LED_ALT_Y, fire_held(IN_ALT) ? 7 : 1);
     led_set(LED_STEP_Y, mode == MODE_STEP ? (trkvol && ((ms_ticks / 300) & 1) ? 2 : 7) : 1);   /* blinks while the track faders are up */
-    led_set(LED_NOTE_Y, mode == MODE_NOTE ? 7 : 1);
+    led_set(LED_NOTE_Y, mode == MODE_NOTE ? 7 : mode == MODE_UNI ? (((ms_ticks / 300) & 1) ? 7 : 2) : 1);   /* v0.38: its 2nd (UNIVERSAL) blinks */
     led_set(LED_DRUM_Y, mode == MODE_DRUM ? (mpcrem && ((ms_ticks / 300) & 1) ? 2 : 7) : 1);   /* blinks while the MPC remote is up */
     led_set(LED_REC_Y, rec_arm ? 7 : 0);
+    /* The four lights beside KNOB MODE (CHANNEL / MIXER / USER 1 / USER 2): only the selected one is lit. The other three
+       were at level 1 until v0.34c and the owner could hardly tell which was on (2026-11-12: "the mode lights are blaring
+       constantly so hard you almost can't tell which you're on ... the corner ones"; even 1 of 21 steps was "still too
+       bright"). ORC mode and Akai's firmware light one of them too. */
     if (held_t >= 0 && held_row < 0) {             /* a step held: which page its knobs are on (CHANNEL = 1, MIXER = 2) */
-        led_set(LED_CHANNEL, knob_page == 0 ? 5 : 1); led_set(LED_MIXER, knob_page == 1 ? 5 : 1);
+        led_set(LED_CHANNEL, knob_page == 0 ? 5 : 0); led_set(LED_MIXER, knob_page == 1 ? 5 : 0);
         led_set(LED_USER1, 0); led_set(LED_USER2, 0);
-    } else {                                        /* otherwise: the free-knob bank, 1-4 */
-        int kb = *kc_bank(kctx()) & 3;
-        led_set(LED_CHANNEL, kb == 0 ? 5 : 1); led_set(LED_MIXER, kb == 1 ? 5 : 1);
-        led_set(LED_USER1, kb == 2 ? 5 : 1); led_set(LED_USER2, kb == 3 ? 5 : 1);
+    } else if (mode == MODE_UNI && uni_ed == 1) {  /* editing a pad: which knob page (CHANNEL = 1, MIXER = 2) */
+        led_set(LED_CHANNEL, uni_ed_kpage == 0 ? 5 : 0); led_set(LED_MIXER, uni_ed_kpage == 1 ? 5 : 0);
+        led_set(LED_USER1, 0); led_set(LED_USER2, 0);
+    } else {                                        /* otherwise: the free-knob bank, 1-4 (UNIVERSAL: its own) */
+        int kb = (mode == MODE_UNI ? G.uni_bank : *kc_bank(kctx())) & 3;
+        led_set(LED_CHANNEL, kb == 0 ? 5 : 0); led_set(LED_MIXER, kb == 1 ? 5 : 0);
+        led_set(LED_USER1, kb == 2 ? 5 : 0); led_set(LED_USER2, kb == 3 ? 5 : 0);
     }
-    led_set(LED_PERFORM_Y, mode == MODE_FADER ? 7 : 1);   /* faders mode */
+    led_set(LED_PERFORM_Y, mode == MODE_FADER ? 7 : mode == MODE_DAW ? (((ms_ticks / 300) & 1) ? 7 : 2) : 1);   /* v0.38: faders lit, its 2nd (the DAW page) blinks */
     led_set(LED_PERFORM_R, fire_held(IN_PERFORM) ? 7 : 0);  /* FILL while held */
     if (mode == MODE_NOTE) {                        /* GRID = octave */
         led_set(LED_GRID_L, kb_base() > 1 ? 2 : 0);
         led_set(LED_GRID_R, kb_base() < 96 ? 2 : 0);
+    } else if (mode == MODE_UNI) {                 /* GRID = page 1-8 */
+        led_set(LED_GRID_L, G.uni_page > 0 ? 2 : 0);
+        led_set(LED_GRID_R, G.uni_page < UNI_PAGES - 1 ? 2 : 0);
     } else {
         led_set(LED_GRID_L, mode == MODE_STEP && page > 0 ? 2 : 0);
         led_set(LED_GRID_R, mode == MODE_STEP && page < PAGES - 1 ? 2 : 0);
@@ -1178,7 +1562,14 @@ static void __attribute__((noinline)) paint(void)
     bool blink = (ms_ticks / 150) & 1;
     led_set(LED_PAT_UP, queued_pat >= 0 && queued_pat > CURPAT ? (blink ? 7 : 0) : 1);
     led_set(LED_PAT_DN, queued_pat >= 0 && queued_pat < CURPAT ? (blink ? 7 : 0) : 1);
-    led_set(LED_BROWSER, menu_on ? 7 : lt_on ? 3 : 1);   /* the menu button: lit while the menu is open */
+    led_set(LED_BROWSER, menu_on ? 7 : 1);   /* the menu button: lit while the menu is open */
+    if (dawm) {                                     /* v0.36 DAW mode: the transport shows the DAW's, the views their buttons */
+        led_set(LED_PLAY_G, daw_led(DB_PLAY) ? 7 : 0); led_set(LED_PLAY_Y, daw_led(DB_PLAY) ? 0 : 2);
+        led_set(LED_STOP_Y, daw_led(DB_STOP) ? 7 : 2); led_set(LED_REC_Y, daw_led(DB_RECORD) ? 7 : 1);
+        led_set(LED_STEP_Y, dawm_view ? 7 : 1); led_set(LED_PERFORM_Y, dawm_view ? 1 : 7);
+        led_set(LED_NOTE_Y, 0); led_set(LED_DRUM_Y, 0);
+        led_set(LED_GRID_L, 2); led_set(LED_GRID_R, 2); led_set(LED_PAT_UP, 2); led_set(LED_PAT_DN, 2);
+    }
 }
 
 /* ---------- screen ---------- */
@@ -1187,113 +1578,18 @@ static void fmt_int(char *o, int v) { char t[12]; int n = 0; if (v < 0) { *o++ =
 static char *cat(char *o, const char *str) { while (*str) *o++ = *str++; *o = 0; return o; }
 static char *cat_int(char *o, int v) { fmt_int(o, v); return o + strlen(o); }
 
-/* ---------- light shows + the BROWSER menu ----------
-   Lights: the pads show an effect instead of the steps. They start by hand (menu: Lights now), when
-   the host asks, or on their own after the idle time with the sequencer stopped. The first touch of
-   any pad or button only ends them (it is not also an edit). While they run: SELECT = next / previous
-   show, knob 1 = speed, STOP (stopped) = next show, BROWSER = the menu.
+/* ---------- the PI VU bars + the BROWSER menu ----------
+   PI VU: the pads show the Pi's audio as 16 bars instead of the steps. They start by hand (menu: Start Pi VU) or when
+   the host asks (02 01); nothing starts them by itself. The first touch of any pad, button or knob only ends them (it is
+   not also an edit); SHIFT, ALT, PLAY, STOP and BROWSER (the menu) work as usual. Started by hand, they wait through a
+   quiet Pi (the bars fall to dark, then come back with the levels); started by the host, its silence ends them.
+   v0.31r: the light SHOWS that used to live here are gone (lights.h).
    A frame is drawn 2 columns at a time, only when the next step is not about to be due (the rule a
    flash write follows), and committed to the LEDs when all 16 columns are done. */
 
 static void saver_start(void);                      /* (save / load section, below) */
-#define LT_SLICES 8                                 /* a frame is drawn in pieces of this many columns each (16 / 8 = 2) */
-#define LT_SLICE_COLS (LT_COLS / LT_SLICES)
-
-static float lt_speed_f(void) { return lights_speed_factor(G.lt_speed); }
-
-/* The Show setting (G.lt_mode): 0-12 = that effect (12 = TRACKS), 13 = CYCLE (it stays 13: saved settings already say so),
-   14 = PI VU bars, 15 = the scrolling TEXT. The menu and SELECT walk them in SHOW_ORDER (CYCLE last): ctl.c. */
-
-static void lights_defaults(void)
-{
-    G.lt_init = 1; G.lt_mode = 1; G.lt_speed = 64; G.lt_idle = 0; G.lt_smooth = 1;   /* SPARKLE, x1, idle start OFF (v0.18), smooth */
-    G.lt_idle_v18 = 1;
-}
-
-/* Make the picked show the running one. idle: an idle start never waits for a host that is not there. */
-static void lights_apply_show(bool idle)
-{
-    int v = G.lt_mode;
-    if (v == 11) v = 1;                             /* (the removed fake VU: never run) */
-    if (idle && v == SHOW_HOST) v = 1;
-    lt_host = v == SHOW_HOST;
-    if (v == SHOW_HOST) { lt_cur = LT_M_HOST; lt_host_ms = ms_ticks; }          /* the pads return after 3 s with no levels */
-    else if (v == SHOW_TEXT) { lt_cur = LT_M_TEXT; lights_set_text(lights_text(), (int)strlen(lights_text())); }   /* from the right edge */
-    else if (v == SHOW_CYCLE) { if (lt_cur >= LT_FX) lt_cur = 7; }       /* RIPPLE: not a twin of the show next to CYCLE in the list */
-    else lt_cur = v;
-    lt_cycle_ms = ms_ticks;
-    lt_pinned = lt_by_host = false;                 /* the Show setting runs: no host effect is pinned over it */
-}
-
-static void lights_on(bool manual, bool host)
-{
-    lt_manual = manual;
-    lights_apply_show(!manual);
-    if (host) { lt_host = true; lt_cur = LT_M_HOST; lt_host_ms = ms_ticks; }    /* the host asked for its bars */
-    lights_clear_bars();                            /* bars start empty (hits counted while the pads were dark are old news) */
-    lt_last_us = us_now(); lt_slice = 0;
-    lt_on = true; led_pad_lock = 1;
-    dirty = true;
-}
-
-static void lights_off(void)
-{
-    if (!lt_on) return;
-    lt_on = false; lt_host = false; lt_by_host = lt_pinned = false; led_pad_lock = 0;
-    lt_input_ms = ms_ticks;                         /* the idle time counts from now (a host "off" must not re-light them at once) */
-    dirty = true;                                   /* the next paint puts the steps back */
-}
-
-static void lights_next(int d)                      /* SELECT / STOP: the next / previous show in the Show list */
-{
-    G.lt_mode = (uint8_t)ctl_show_step(G.lt_mode, d); touched_global();
-    lights_apply_show(false);
-    dirty = true;
-}
-
-static void lights_speed(int v)                     /* knob 1 while lights run */
-{
-    int s = (int)G.lt_speed + v * 3;
-    G.lt_speed = (uint8_t)(s < 0 ? 0 : s > 127 ? 127 : s);
-    touched_global();
-    dirty = true;
-}
-
-/* The running show was picked as PI VU (not an effect the host pinned, not a show the host started). */
-static bool show_is_host(void) { return G.lt_mode == SHOW_HOST && !lt_pinned && !lt_by_host; }
-
-static void lights_task(uint32_t now, bool quiet)
-{
-    if (!lt_on) return;
-    switch (ctl_host_timeout(lt_on, lt_host, show_is_host(), ms_ticks, lt_host_ms)) {   /* the host went quiet */
-    case HT_FALLBACK: lt_host = false; lt_cur = 1; lt_cycle_ms = ms_ticks; dirty = true; break;   /* SPARKLE until levels come back */
-    case HT_OFF: lights_off(); return;
-    default: break;
-    }
-    if (!quiet) return;
-    if (lt_slice == 0) {
-        if (!ctl_frame_due(now, lt_last_us)) return;    /* ~30 frames a second */
-        float dt = (float)(now - lt_last_us) * 1e-6f;
-        if (dt > 0.2f) dt = 0.2f;
-        lt_last_us = now;
-        lt_t += dt * ((float)BPM / 60.0f * 3.0f) * lights_scale(lt_cur) * lt_speed_f();   /* tempo-locked, like the ORC */
-        if (lt_t > 40000.0f) lt_t = fmodf(lt_t, 6283.185f);
-        lights_step(dt);
-        if (ctl_cycle_due(G.lt_mode, lt_cur, lt_pinned, ms_ticks, lt_cycle_ms)) {   /* CYCLE (the 12 time-driven shows) */
-            do lt_cur = (lt_cur + 1) % LT_FX; while (lt_cur == 11);   /* (11 = the removed fake VU) */
-            lt_cycle_ms = ms_ticks; dirty = true;
-        }
-    }
-    lights_cols(lt_cur, lt_t, lt_slice * LT_SLICE_COLS, (lt_slice + 1) * LT_SLICE_COLS, lt_stage);
-    if (++lt_slice == LT_SLICES) {                  /* the frame is complete: show it */
-        lt_slice = 0; lt_frame++;
-        for (int r = 0; r < LT_ROWS; r++)
-            for (int c = 0; c < LT_COLS; c++)
-                for (int j = 0; j < 3; j++)
-                    led_level[led_pad(r, c, j)] = (uint8_t)lights_level(lt_stage[r * LT_COLS + c][j], r, c, lt_frame, G.lt_smooth);
-    }
-}
-
+static bool save_paint_only;                        /* v0.38b: this run writes paintings (v0.39: and the crash record) only:
+                                                       never the sequencer's unsaved edits when AUTOSAVE is off */
 /* The menu. Items edit G fields directly; SELECT scrolls, pushing it opens / confirms, BROWSER backs out. */
 /* Free-knob banks (v0.20): with nothing held, KNOB MODE steps banks 1-4 and the knobs do what the bank says. Bank 1 out
    of the box = the old behaviour (knob 1 swing, knobs 2-4 relative CC 17 / 18 / 19 on ch 1); banks 2-4 = CC 20-31. */
@@ -1337,23 +1633,25 @@ static void clock_out_toggle(void)
     dirty = true; touched_global();
 }
 
-enum { MK_ENUM, MK_EFFECT, MK_SPEED, MK_ACT, MK_SUB,
+enum { MK_ENUM, MK_ACT, MK_SUB,
        MK_INFO,                                     /* a read-only line (the shortcut pages): the name is the whole text */
        MK_TEMPO, MK_SWING, MK_CLOCK,                /* Playing: the same values SHIFT + SELECT, knob 1, SHIFT + PLAY change */
        MK_KSEC, MK_KBANK, MK_KSEL, MK_KFN, MK_KCH, MK_KMODE,     /* Knobs: the section, the bank, which knob, what it sends, channel, mode */
-       MK_ROOM };                                       /* Memory (v0.26): read-only, n = 0 drum steps left, 1 note steps left, 2 % used */
+       MK_ROOM,                                         /* Memory (v0.26): read-only, n = 0 drum steps left, 1 note steps left, 2 % used */
+       MK_ABOUT };                                      /* About (v0.35): read-only, n = ABOUT_* (crash.h crash_about_value) */
 /* grp = the menu page the item is on (0 = the top); a MK_SUB item opens page n. */
 typedef struct { const char *name; uint8_t grp, kind; uint8_t *v; uint8_t n; const char *const *names; void (*act)(void); } mitem_t;
 
+static crash_info_t crash_boot;                     /* (defined with the crash code below; the About page reads it) */
 static void menu_save_now(void);
-static void menu_lights_now(void);
-static void menu_surface_now(void);
+static void menu_host_now(void);
+static void menu_dawm_now(void);
+static void menu_paint_now(void);
+static void set_mode(int m);
 static int menu_knob;                               /* Knobs page: the knob being set up (0-3) */
 static int menu_kc;                                 /* Knobs page: the section being set up (the one the pads were in when the menu opened) */
 static const char *const NM_AUTOSAVE[2] = {"on", "off"};   /* autosave_off = 0 means ON */
-static const char *const NM_OFFON[2] = {"off", "on"};
-static const char *const NM_BARS[5] = {"snappy", "smooth", "whole", "heat", "heat smooth"};
-static const char *const NM_IDLE[6] = {"off", "15s", "30s", "1m", "2m", "5m"};
+static const char *const NM_DAWP[3] = {"auto", "MCU", "HUI"};
 static const char *const NM_MARKS[2] = {"on", "off"};   /* mark_off 0 = marks on */
 static const char *const NM_SPACING[3] = {"every beat", "every bar", "beat+bar"};
 static const char *const NM_KMODE[2] = {"relative", "absolute"};
@@ -1362,20 +1660,17 @@ static const mitem_t MENU[] = {
     /* the top page */
     {"Autosave",    0, MK_ENUM,   &G.autosave_off, 2, NM_AUTOSAVE, 0},
     {"Save now",    0, MK_ACT,    0, 0, 0, menu_save_now},
-    {"ORC mode", 0, MK_ACT,    0, 0, 0, menu_surface_now},
+    {"ORC mode",    0, MK_ACT,    0, 0, 0, menu_host_now},      /* v0.33: the ORC takes the whole Fire (hostm.h) */
+    {"MCU/HUI/DAW", 0, MK_ACT,    0, 0, 0, menu_dawm_now},      /* v0.36: Mackie Control / HUI for a computer (daw.h) */
+    {"Paint",       0, MK_ACT,    0, 0, 0, menu_paint_now},     /* v0.37: paint the pads (paint.h) */
+    {"DAW protocol",0, MK_ENUM,   &G.daw_proto, 3, NM_DAWP, 0},
     {"Playing",     0, MK_SUB,    0, 2, 0, 0},
     {"Knobs",       0, MK_SUB,    0, 3, 0, 0},
     {"Display",     0, MK_SUB,    0, 4, 0, 0},
-    {"Lights",      0, MK_SUB,    0, 1, 0, 0},
     {"Memory",      0, MK_SUB,    0, 16, 0, 0},
     {"Shortcuts",   0, MK_SUB,    0, 5, 0, 0},
-    /* page 1: lights */
-    {"Start lights", 1, MK_ACT,   0, 0, 0, menu_lights_now},
-    {"Show",        1, MK_EFFECT, &G.lt_mode, SHOW_VALUES, 0, 0},
-    {"Speed",       1, MK_SPEED,  &G.lt_speed, 128, 0, 0},
-    {"Idle start",  1, MK_ENUM,   &G.lt_idle, 6, NM_IDLE, 0},
-    {"Smooth",      1, MK_ENUM,   &G.lt_smooth, 2, NM_OFFON, 0},
-    {"Bar look",    1, MK_ENUM,   &G.lt_bars, 5, NM_BARS, 0},
+    {"About",       0, MK_SUB,    0, 17, 0, 0},     /* v0.35: version + the crash on record, for a tester's photo */
+    /* page 1: was the Pi VU bars (gone in v0.36) */
     /* page 2: playing (the shortcuts still work) */
     {"Tempo",       2, MK_TEMPO,  0, 0, 0, 0},
     {"Swing",       2, MK_SWING,  0, 0, 0, 0},
@@ -1431,6 +1726,7 @@ static const mitem_t MENU[] = {
     {"GRID: octave", 12, MK_INFO, 0, 0, 0, 0}, {"SH+GRID: semitone", 12, MK_INFO, 0, 0, 0, 0},
     {"SELECT: track M1-8", 12, MK_INFO, 0, 0, 0, 0}, {"ALT+SELECT: channel", 12, MK_INFO, 0, 0, 0, 0},
     {"SH+pad: accent", 12, MK_INFO, 0, 0, 0, 0}, {"REC: record notes", 12, MK_INFO, 0, 0, 0, 0},
+    {"NOTE again: UNIV", 12, MK_INFO, 0, 0, 0, 0},  /* v0.38 */
     {"ALT+tap: pick group", 13, MK_INFO, 0, 0, 0, 0}, {"ALT+1A: channel", 13, MK_INFO, 0, 0, 0, 0},
     {"ALT+1B: first note", 13, MK_INFO, 0, 0, 0, 0}, {"Top row btn: 16 lv", 13, MK_INFO, 0, 0, 0, 0},
     {"SH+pad: accent", 13, MK_INFO, 0, 0, 0, 0}, {"REC: record hits", 13, MK_INFO, 0, 0, 0, 0},
@@ -1438,19 +1734,28 @@ static const mitem_t MENU[] = {
     {"Tap PERFORM: open", 14, MK_INFO, 0, 0, 0, 0}, {"Tap column: level", 14, MK_INFO, 0, 0, 0, 0},
     {"1A-1D: fine tune", 14, MK_INFO, 0, 0, 0, 0}, {"SELECT: scroll", 14, MK_INFO, 0, 0, 0, 0},
     {"Empty row btn: add", 14, MK_INFO, 0, 0, 0, 0}, {"SH+row: remove", 14, MK_INFO, 0, 0, 0, 0},
-    {"Row+1A-C: CC/ch/col", 14, MK_INFO, 0, 0, 0, 0},
+    {"Row+1A-C: CC/ch/col", 14, MK_INFO, 0, 0, 0, 0}, {"PERFORM x2: DAW pg", 14, MK_INFO, 0, 0, 0, 0},
     {"KNOB MODE: bank 1-4", 15, MK_INFO, 0, 0, 0, 0}, {"  tap; hold = roll", 15, MK_INFO, 0, 0, 0, 0},
     {"Lit light: bank", 15, MK_INFO, 0, 0, 0, 0}, {"Own banks per mode", 15, MK_INFO, 0, 0, 0, 0}, {"BROWSER>Knobs: edit", 15, MK_INFO, 0, 0, 0, 0},
     /* page 16: memory (v0.26): how much room the steps have left (read-only) */
     {"Drum steps left", 16, MK_ROOM, 0, 0, 0, 0}, {"Note steps left", 16, MK_ROOM, 0, 1, 0, 0},
     {"Memory used", 16, MK_ROOM, 0, 2, 0, 0},
+    /* page 17: about (v0.35): which firmware, and the crash on record (read-only; a photo of it is a bug report) */
+    /* v0.35b: the first screenful (6 rows) holds everything a crash needs (build + PC + LR = where in the code), so ONE photo
+       is enough; the counts come after */
+    {"Version",  17, MK_ABOUT, 0, ABOUT_VERSION, 0, 0}, {"Build",    17, MK_ABOUT, 0, ABOUT_BUILD, 0, 0},
+    {"Crash",    17, MK_ABOUT, 0, ABOUT_CAUSE, 0, 0},   {"In",       17, MK_ABOUT, 0, ABOUT_STAGE, 0, 0},
+    {"PC",       17, MK_ABOUT, 0, ABOUT_PC, 0, 0},      {"LR",       17, MK_ABOUT, 0, ABOUT_LR, 0, 0},
+    {"Crashes",  17, MK_ABOUT, 0, ABOUT_TOTAL, 0, 0},   {"Uptime",   17, MK_ABOUT, 0, ABOUT_UPTIME, 0, 0},
+    {"Misreads", 17, MK_ABOUT, 0, ABOUT_MISREADS, 0, 0},
 };
 #define MENU_ALL ((int)(sizeof MENU / sizeof MENU[0]))
-#define MENU_PAGES 17
+#define MENU_PAGES 18
 #define MENU_PAGE_MAX 16                            /* the most items one page may hold (draw_menu's arrays) */
-static const char *const MENU_TITLE[MENU_PAGES] = {"Menu", "Lights", "Playing", "Knobs", "Display", "Shortcuts",
-    "Steps", "Hold step", "Hold row", "Patterns", "Song edit", "Playing", "Note mode", "Drum mode", "Faders", "Knobs", "Memory"};   /* <= 10 characters: room before "BRW=back" */
-static const uint8_t MENU_PARENT[MENU_PAGES] = {0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0};   /* where BROWSER goes back to */
+static const char *const MENU_TITLE[MENU_PAGES] = {"Menu", "(unused)", "Playing", "Knobs", "Display", "Shortcuts",
+    "Steps", "Hold step", "Hold row", "Patterns", "Song edit", "Playing", "Note mode", "Drum mode", "Faders", "Knobs", "Memory",
+    "About"};   /* <= 10 characters: room before "BRW=back" */
+static const uint8_t MENU_PARENT[MENU_PAGES] = {0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0, 0};   /* where BROWSER goes back to */
 
 static int menu_count(void)                         /* items on the open page */
 {
@@ -1468,34 +1773,19 @@ static void menu_toast_set(const char *s) { cat(menu_toast, s); menu_toast_ms = 
 
 static void menu_save_now(void)
 {
-    bool any = global_dirty || (pat_dirty & ~pat_stuck);
+    bool any = global_dirty || (pat_dirty & ~pat_stuck) || uni_dirty();
     if (save_run || store2_busy()) menu_toast_set("busy, retry");
     else if (!any) menu_toast_set("nothing new");
     else { save_force = true; saver_start(); menu_toast_set("saving..."); }
 }
 
-static void menu_lights_now(void) { menu_on = menu_edit = false; menu_grp = 0; menu_sel = 0; lights_on(true, false); }
-/* Back to the ORC's surface after a mode button left it (the owner: "how do I bring this up on the Fire?"). The colours
-   and channel the ORC sent are still here; without them there is nothing to show. */
-static void menu_surface_now(void)
-{
-    if (!surf_known) { menu_toast_set("no ORC surface yet"); return; }
-    menu_on = menu_edit = false; menu_grp = 0; menu_sel = 0;
-    surface_on = true; lights_off(); song_edit = false; trkvol = false; held_t = held_s = -1; held_pad = -1;
-    dirty = true;
-}
+/* (v0.36b: BROWSER > DAW page is gone: PERFORM's third tap reaches the Pi's DAW page, and only once the Pi set one up) */
 static void menu_value(const mitem_t *m, char *o)
 {
     *o = 0;
     switch (m->kind) {
     case MK_SUB: cat(o, ">"); break;
     case MK_ENUM: cat(o, m->names[*m->v < m->n ? *m->v : 0]); break;
-    case MK_EFFECT: cat(o, ctl_show_name(*m->v)); break;
-    case MK_SPEED: {
-        int h = (int)(lt_speed_f() * 100.0f + 0.5f);
-        o = cat(o, "x"); o = cat_int(o, h / 100); o = cat(o, "."); if (h % 100 < 10) o = cat(o, "0"); cat_int(o, h % 100);
-        break;
-    }
     case MK_TEMPO: o = cat_int(o, BPM); cat(o, " bpm"); break;
     case MK_SWING: o = cat_int(o, G.swing); cat(o, "%"); break;
     case MK_CLOCK: cat(o, G.clock_out ? "on" : "off"); break;
@@ -1506,6 +1796,9 @@ static void menu_value(const mitem_t *m, char *o)
         else { o = cat_int(o, (int)(((ST_POOL - room) * 100u + ST_POOL - 1u) / ST_POOL)); cat(o, "%"); }   /* rounded up: full = 100 */
         break;
     }
+    case MK_ABOUT:                                  /* About page: the crash read at boot (06 01 clears it) + the live misread count */
+        crash_about_value(m->n, &crash_boot, t4_note.magic == T4_NOTE_MAGIC ? t4_note.count : 0u, FW_VERSION, BUILD_ID, o);
+        break;
     case MK_KSEC: cat(o, NM_KCTX[menu_kc % KC_N]); break;
     case MK_KBANK: cat_int(o, (*kc_bank(menu_kc) & 3) + 1); break;
     case MK_KSEL: { char kn[3] = {(char)('1' + (*kc_bank(menu_kc) & 3)), (char)('A' + (menu_knob & 3)), 0}; cat(o, kn); break; }   /* bank + knob: 3C */
@@ -1548,17 +1841,14 @@ static void menu_turn(int d)
     case MK_KMODE: *kc_abs(menu_kc, b, menu_knob) = d > 0 ? 1 : 0; edited_global(); return;
     default: break;
     }
-    if (m->kind == MK_EFFECT) {                     /* the Show list, in its own order (a running show switches at once) */
-        *m->v = (uint8_t)ctl_show_clamp(*m->v, d); edited_global();
-        if (lt_on) lights_apply_show(false);
-        return;
-    }
-    int step = m->kind == MK_SPEED ? (fire_held(IN_SHIFT) ? 1 : 4) : 1;
-    int v = (int)*m->v + (d > 0 ? step : -step);
+    uint8_t was = *m->v;
+    int v = (int)*m->v + (d > 0 ? 1 : -1);
     if (v < 0) v = 0;
     if (v > (int)m->n - 1) v = (int)m->n - 1;
     *m->v = (uint8_t)v;
-    lights_set_bar_style(G.lt_bars);                /* (cheap: only the bar look is affected, and only if it changed) */
+    if (m->v == &G.daw_proto && *m->v != was) {   /* a new protocol choice starts the translator over (v0.38b: only a real change) */
+        daw_init(G.daw_proto % 3); memset(dawm_lvl, 0, sizeof dawm_lvl); dawm_proto_seen = (uint8_t)daw_proto();
+    }
     if (m->v == &G.autosave_off) { save_force = true; edited_global(); }   /* the setting itself always saves */
     else edited_global();
 }
@@ -1568,7 +1858,7 @@ static void menu_push(void)                         /* SELECT pushed */
     const mitem_t *m = menu_it(menu_sel);
     if (m->kind == MK_ACT) m->act();
     else if (m->kind == MK_SUB) { menu_grp = m->n; menu_sel = 0; menu_edit = false; }
-    else if (m->kind == MK_INFO || m->kind == MK_ROOM) return;   /* a shortcut line / a memory readout: nothing to change */
+    else if (m->kind == MK_INFO || m->kind == MK_ROOM || m->kind == MK_ABOUT) return;   /* a shortcut line / a readout: nothing to change */
     else menu_edit = !menu_edit;
 }
 
@@ -1593,24 +1883,15 @@ static bool overlay_event(int idx, int pad)
         return true;
     }
     if (idx == IN_BROWSER) { menu_on = true; menu_edit = false; menu_grp = 0; menu_sel = 0; menu_kc = kctx(); dirty = true; return true; }
-    if (!lt_on) return false;
-    if (idx == IN_SHIFT || idx == IN_ALT) return false;
-    if (idx == IN_PLAY) { if (!lt_manual) lights_off(); return false; }
-    if (idx == IN_STOP && !playing && !ext_playing) { lights_next(1); commit_pending(); return true; }   /* STOP still saves what waits */
-    if (idx == IN_STOP) return false;
-    if (idx != IN_SELECT) {                         /* anything else: the pads were only asleep */
-        lights_off();
-        if (pad >= 0) lt_eat |= (uint64_t)1 << pad;
-    }
-    return true;
+    (void)pad;
+    return false;
 }
 
 /* unsaved changes: a save pending / running, or (with AUTOSAVE off) anything waiting for SAVE NOW */
 static bool unsaved(void)
 {
-    return save_due || save_lazy_due || save_run || save_waiting_compact || (G.autosave_off && (global_dirty || (pat_dirty & ~pat_stuck)));
+    return save_due || save_lazy_due || save_run || save_waiting_compact || uni_unsaved() || (G.autosave_off && (global_dirty || (pat_dirty & ~pat_stuck)));
 }
-static void draw_save_star(void) { if (unsaved()) draw_text(122, 0, "*", 1); }
 
 static void __attribute__((noinline)) draw_menu(void)
 {
@@ -1627,38 +1908,13 @@ static void __attribute__((noinline)) draw_menu(void)
     scr_menu(MENU_TITLE[menu_grp], note, rows, n, menu_sel, menu_edit, unsaved());
 }
 
-static void __attribute__((noinline)) draw_lights_screen(void)
-{
-    char buf[24], *o;
-    draw_text(0, 0, "Lights", 1);
-    if (lt_host) draw_text(44, 0, "Host", 1);
-    else if (G.lt_mode == SHOW_CYCLE && lt_cur < LT_FX) draw_text(44, 0, "Cycle", 1);
-    draw_text(0, 16, lt_cur == LT_M_HOST ? "Pi VU" : LT_NAME[lt_cur], 2);
-    int h = (int)(lt_speed_f() * 100.0f + 0.5f);
-    o = cat(buf, "x"); o = cat_int(o, h / 100); o = cat(o, "."); if (h % 100 < 10) o = cat(o, "0"); o = cat_int(o, h % 100);
-    o = cat(o, "  "); o = cat_int(o, BPM); cat(o, "bpm");
-    if (lt_cur == LT_M_TEXT) draw_text_n(0, 36, lights_text(), 21, 1);   /* the message itself */
-    else draw_text(0, 36, buf, 1);
-    draw_text(0, 46, "SEL=show  1A=speed", 1);
-    draw_text(0, 55, "BRW=menu  tap=exit", 1);
-    draw_save_star();
-}
-
 static void __attribute__((noinline)) render(void)
 {
     char buf[24], *o;
     draw_clear();
     if (menu_on) { draw_menu(); return; }
-    if (lt_on) { draw_lights_screen(); return; }
-    if (surface_on) {                               /* the ORC surface: say whose pads they are and how to leave */
-        draw_text(0, 0, "ORC mode", 1);
-        draw_text(0, 20, "pads talk to the ORC", 1);
-        draw_text(0, 30, "no MIDI channel used", 1);
-        draw_text(0, 46, "STEP/NOTE/DRUM/PERF", 1);
-        draw_text(0, 55, "= back to the seq", 1);
-        draw_save_star();
-        return;
-    }
+    if (paintm) { pm_screen(); return; }            /* v0.37 PAINT mode */
+    if (dawm && dawm_view) { draw_dawm_screen(); return; }   /* v0.36 DAW mode's button view */
     if (pop_kind && ms_ticks - pop_ms < 1200) {      /* tempo / swing: the number, big, for a moment after a change */
         if (pop_kind == 1) scr_popup("Tempo", BPM, "bpm", BPM, 40, 300, unsaved());
         else scr_popup("Swing", G.swing, "%", G.swing, 50, 75, unsaved());
@@ -1681,13 +1937,31 @@ static void __attribute__((noinline)) render(void)
     cat(stat, status_line);
     if (picker_on()) cat(ctx, "Patterns");
     else if (roll_shown()) cat(ctx, "Roll");
-    else if (mode == MODE_FADER) {
-        if (held_row >= 0 && held_row_t < G.fad_n) { cat(ctx, "Fader"); stat[0] = 0; }
+    else if (fader_mode()) {                        /* FADERS, or (v0.31d) the DAW page: "DAW F1-4/9" */
+        if (mode == MODE_FADER && held_row >= 0 && held_row_t < G.fad_n) { cat(ctx, "Fader"); stat[0] = 0; }
         else {
-            int rows = G.fad_n < MAXFADERS ? G.fad_n + 1 : MAXFADERS;
-            cat(ctx, "Faders");
-            o = cat(stat, "F"); o = cat_int(o, fad_top + 1); o = cat(o, "-"); o = cat_int(o, fad_top + VIEW_ROWS < rows ? fad_top + VIEW_ROWS : rows);
-            o = cat(o, "/"); cat_int(o, G.fad_n);
+            fset_t s = fset();
+            int rows = s.n + (!s.daw && s.n < MAXFADERS ? 1 : 0), top = *s.top;
+            cat(ctx, s.daw ? "DAW" : "Faders");
+            o = cat(stat, "F"); o = cat_int(o, top + 1); o = cat(o, "-"); o = cat_int(o, top + VIEW_ROWS < rows ? top + VIEW_ROWS : rows);
+            o = cat(o, "/"); cat_int(o, s.n);
+        }
+    }
+    else if (mode == MODE_UNI) {                    /* v0.31: "Univ P3/8 name", or what is being edited */
+        cat(ctx, uni_ed ? "Edit" : "Univ");
+        if (uni_ed == 1) {
+            o = cat(stat, "pad "); o = cat_int(o, uni_ed_idx / 16 + 1); o = cat(o, "-"); o = cat_int(o, uni_ed_idx % 16 + 1);
+            if (uni_ed_layer) cat(o, " SHIFT");
+        } else if (uni_ed == 2) {
+            o = cat(stat, "knob "); *o++ = (char)('1' + (uni_ed_idx >> 2)); *o++ = (char)('A' + (uni_ed_idx & 3)); *o = 0;
+        } else if (!status_line[0]) {
+            o = cat(stat, "P"); o = cat_int(o, G.uni_page + 1); o = cat(o, "/8 ");
+            if (fire_held(UNI_LAYER_BTN)) o = cat(o, "SHIFT ");
+            uint32_t ln; const uint8_t *r = uni_base(G.uni_page, &ln);
+            int n = UNI_NAME;
+            while (r && n > 0 && r[n] == ' ') n--;  /* (name bytes 1-8, trailing spaces off) */
+            for (int i = 1; r && i <= n; i++) *o++ = (char)r[i];
+            *o = 0;
         }
     }
     else if (mode == MODE_NOTE) cat(ctx, "NOTE");
@@ -1739,14 +2013,51 @@ static void __attribute__((noinline)) render(void)
         o = cat(buf, "1C "); cat(o, FAD_COL_NAME[G.fad_col[f] & 15]);
         draw_text(0, 55, buf, 1);
         draw_text(50, 28, "SH+row=del", 1);
-    } else if (mode == MODE_FADER) {                /* the 4 visible faders, as bars */
+    } else if (fader_mode()) {                      /* the 4 visible faders, as bars (the DAW page: the host's names) */
+        fset_t s = fset();
         scr_fader_t fl[4];
+        const char *nm[4];
         for (int r = 0; r < VIEW_ROWS; r++) {
-            int f = fad_top + r;
-            fl[r].used = f < G.fad_n ? 1 : f == G.fad_n ? 0 : -1;
-            fl[r].num = f + 1; fl[r].cc = f < G.fad_n ? G.fad_cc[f] : 0; fl[r].val = f < G.fad_n ? G.fad_val[f] : 0;
+            int f = *s.top + r;
+            fl[r].used = f < s.n ? 1 : !s.daw && f == s.n ? 0 : -1;
+            fl[r].num = f + 1; fl[r].cc = f < s.n && !s.daw ? G.fad_cc[f] : 0; fl[r].val = f < s.n ? s.val[f] : 0;
+            nm[r] = f < s.n && s.daw ? daw.name[f] : 0;
         }
-        scr_faders(fl);
+        scr_fader_rows(fl, s.daw ? nm : 0);
+    } else if (mode == MODE_UNI && uni_ed) {        /* v0.31: editing a pad / a knob on the Fire */
+        char L[4][20];
+        if (uni_ed == 1) {
+            const uint8_t *e = uni_entry(G.uni_page, uni_pad_key(uni_ed_idx, uni_ed_layer));
+            uni_pad_lines(e ? uni_pad_of(e) : uni_pad_blank(), uni_ed_kpage, uni_ed_layer, L);
+        } else {
+            const uint8_t *e = uni_entry(G.uni_page, uni_knob_key(uni_ed_idx));
+            uni_knob_lines(e ? uni_knob_of(e) : uni_knob_blank(), L);
+        }
+        const char *const lp[4] = {L[0], L[1], L[2], L[3]};
+        scr_lines(lp);
+    } else if (mode == MODE_UNI) {                  /* v0.31: the knob bank's 4 knobs */
+        char lab[4][20];
+        const char *lp[4];
+        int val[4], used[4], any = 0;
+        for (int k = 0; k < 4; k++) {
+            int slot = (G.uni_bank & 3) * 4 + k;
+            uni_knob_t kn;
+            used[k] = uni_knob_get(G.uni_page, slot, &kn);
+            if (!used[k]) kn = uni_knob_blank();
+            uni_knob_row(kn, slot, lab[k]);
+            val[k] = uni_kv[G.uni_page][slot];
+            lp[k] = lab[k];
+            any |= used[k];
+        }
+        uint32_t ln;
+        if (!any && !uni_base(G.uni_page, &ln) && !uni_has_slots(G.uni_page, UNI_ALL)) {
+            static const char *const EMPTY[4] = {"(empty page)", "set up on the ORC", "or ALT + tap a pad", "GRID < > = page"};
+            scr_lines(EMPTY);
+        } else {
+            int mark = -1;
+            if (uni_last_knob >= 0 && uni_last_knob >> 2 == (G.uni_bank & 3)) mark = uni_last_knob & 3;
+            scr_uni_knobs(lp, val, used, mark);
+        }
     } else if (mode == MODE_NOTE) {                        /* keyboard */
         draw_text(0, 28, "NOTE", 2);
         o = cat(buf, track_name(kb_track())); o = cat(o, " ch"); cat_int(o, tchan(kb_track()));
@@ -1868,23 +2179,61 @@ static void __attribute__((noinline)) render(void)
 
 /* ---------- faders ---------- */
 
-static int fad_max_top(void) { int rows = G.fad_n < MAXFADERS ? G.fad_n + 1 : MAXFADERS; return rows > VIEW_ROWS ? rows - VIEW_ROWS : 0; }
+static int fad_max_top(void) { fset_t s = fset(); return ctl_fset_max_top(s.n, !s.daw, MAXFADERS, VIEW_ROWS); }
+/* v0.31f: 1E <dir> <count> = the user turned SELECT on the DAW page: the host moves the list (one track per detent) */
+static void daw_page_bank(int dir, int count)
+{
+    uint8_t m[CTL_DAW_BANK_LEN];
+    midi_sendn(m, ctl_daw_bank_msg(m, dir, count));
+}
+/* scroll the set on screen. v0.31f: the DAW page never scrolls itself: every detent asks the host to move its list
+   (the owner, 2026-11-09: tracks then MASTER as one list, one track at a time, instead of banks of 8 + MASTER) */
 static void scroll_faders(int d)
 {
-    fad_top += d;
-    if (fad_top > fad_max_top()) fad_top = fad_max_top();
-    if (fad_top < 0) fad_top = 0;
+    fset_t s = fset();
+    if (s.daw && !dawm) { if (d) daw_page_bank(d > 0 ? 1 : -1, d < 0 ? -d : d); return; }
+    int edge = ctl_fset_scroll(s.top, d, fad_max_top());
+    if (s.daw && edge) daw_channel(edge);           /* v0.36 DAW mode: past the last / first row the DAW moves one track */
     dirty = true;
 }
 static void fader_send(int f) { midi_send3((uint8_t)(0xB0 | (G.fad_ch[f] - 1)), G.fad_cc[f], G.fad_val[f]); }
-static void fader_set(int f, int v)                 /* a new level: send it, remember it (rides along with the next save) */
+/* a new level from the Fire (tap / knob) for row f of the set on screen: FADERS sends its CC (the level rides along with
+   the next save), the DAW page sends 1D to the host (RAM only). Nothing is sent when the level did not change. */
+/* v0.31f: a DAW row's 14-bit level from the Fire (tap / knob): stored, sent as 1D, never saved */
+static void daw_set_fine(int f, int fine)
 {
-    v = v < 0 ? 0 : v > 127 ? 127 : v;
-    if (G.fad_val[f] == v) return;
-    G.fad_val[f] = (uint8_t)v;
-    fader_send(f);
-    touched_global();
+    if (!ctl_daw_level(&daw, f, fine)) return;
+    if (dawm) { daw_fader(f, daw.fine[f], ms_ticks); dirty = true; return; }   /* v0.36 DAW mode: to the DAW (touch + level) */
+    uint8_t m[CTL_DAW_LEVEL_LEN];
+    midi_sendn(m, ctl_daw_level_msg(m, f, daw.fine[f]));
     dirty = true;
+}
+/* v0.31f: knob k turned v detents on DAW row `row`: full resolution, faster turns take bigger steps */
+static void daw_knob(int k, int row, int v)
+{
+    static uint32_t last[4];
+    uint32_t now = ms_ticks;
+    int step = ctl_daw_knob_step(now - last[k & 3]);
+    last[k & 3] = now;
+    daw_set_fine(row, daw.fine[row] + v * step);
+}
+static void fader_set(int f, int v)
+{
+    fset_t s = fset();
+    if (s.daw) { daw_set_fine(f, ctl_daw_tap_fine(v)); return; }   /* a tap: the column's level, exactly as before */
+    if (!ctl_fset_set(s.val, f, v)) return;
+    fader_send(f); touched_global();
+    dirty = true;
+}
+/* v0.31d: a host change to DAW row `row` repaints only when the DAW page is on screen and that row is visible */
+static void daw_dirty(int row) { if (mode == MODE_DAW && row >= daw_top && row < daw_top + VIEW_ROWS) dirty = true; }
+/* v0.31c: a CC FROM THE HOST sets every fader on its channel + CC (e.g. REAPER's faders through the Pi). The host is the
+   one telling us, so nothing is sent back, and it is not a save of its own: the level rides along with the next save.
+   Only a repaint, and only when a changed fader is on screen (paint is coalesced: one per main-loop pass at most). */
+static void fader_follow(uint8_t st, uint8_t num, uint8_t val)
+{
+    uint32_t m = ctl_fader_follow(G.fad_val, G.fad_ch, G.fad_cc, G.fad_n, st, num, val);
+    if (m && mode == MODE_FADER && (m >> fad_top & ((1u << VIEW_ROWS) - 1u))) dirty = true;
 }
 static void fader_add(void)                         /* a new fader at the end: next channel, CC 7, next colour */
 {
@@ -1910,7 +2259,7 @@ static void fader_remove(int f)                     /* the faders below move up 
 
 static void scroll_tracks(int d)
 {
-    if (mode == MODE_FADER) { scroll_faders(d); return; }
+    if (fader_mode()) { scroll_faders(d); return; }
     view_top += d;
     if (view_top < 0) view_top = 0;
     if (view_top > TRACKS - VIEW_ROWS) view_top = TRACKS - VIEW_ROWS;
@@ -2024,13 +2373,13 @@ static void undo_do(void)
 
 static void set_mode(int m)
 {
-    if (surface_on) { surface_on = false; dirty = true; }   /* any mode button leaves the ORC surface */
     if (m == mode) return;
     mode = m;
     held_t = held_s = -1; held_pad = -1;            /* a held step pad no longer means anything */
     row_consumed = 0;                               /* nor does a pending chord of row buttons */
     if (m != MODE_STEP) { song_edit = false; trkvol = false; }
     if (m != MODE_DRUM) mpcrem = false;
+    if (m != MODE_UNI) { if (uni_ed || uni_copy_src >= 0 || uni_unsaved()) uni_edit_end(); uni_held = 0; uni_latch_off(-1); }   /* v0.31: latched notes end too */
     dirty = true;
 }
 
@@ -2078,19 +2427,14 @@ static void live_release(int pad)
     if (!live[pad].on) return;
     live[pad].on = false;
     dirty = true;
-    if (live[pad].sx) {                             /* a surface pad: its release is a surface message too */
-        live[pad].sx = false;
-        surf_send(pad, 0);
-        return;
-    }
-    if (live[pad].cc) {                             /* an MPC panel pad: let the MPC's pad go */
+    if (live[pad].cc) {                             /* an MPC panel pad (off 0) / a UNIVERSAL CC hold pad: its off value */
         live[pad].cc = false;
-        midi_send3((uint8_t)(0xB0 | live[pad].chan), live[pad].note, 0);
+        midi_send3((uint8_t)(0xB0 | live[pad].chan), live[pad].note, live[pad].off);
         return;
     }
     if (live[pad].keys && notes_held[live[pad].note]) notes_held[live[pad].note]--;
     bool other = false;                             /* another pad still holding the same NOTE + channel? (a held CC or surface pad with that number is not one: v0.28) */
-    for (int q = 0; q < 64; q++) if (live[q].on && !live[q].cc && !live[q].sx && live[q].note == live[pad].note && live[q].chan == live[pad].chan) other = true;
+    for (int q = 0; q < 64; q++) if (live[q].on && !live[q].cc && live[q].note == live[pad].note && live[q].chan == live[pad].chan) other = true;
     if (!other) midi_send3((uint8_t)(0x80 | live[pad].chan), live[pad].note, 0);
 }
 
@@ -2106,10 +2450,10 @@ static inline unsigned pad_hold_ms(void) { return PAD_HOLD_MS[G.pad_hold % 6]; }
 
 /* the roller (see roll_pad): which step is about to sound, and what the held pads make each track do */
 static uint32_t roll_anchor(void) { return (playing && pending >= 0) ? (uint32_t)pending : gstep; }
-static bool roll_ready(void) { return roll_key && fire_held(IN_KNOBMODE) && mode == MODE_STEP && !song_edit && !surface_on && !picker_on(); }
+static bool roll_ready(void) { return roll_key && fire_held(IN_KNOBMODE) && mode == MODE_STEP && !song_edit && !picker_on(); }
 static bool roll_shown(void)                        /* the pads show the roller (after 150 ms of KNOB MODE, or while a roller pad is held) */
 {
-    if (mode != MODE_STEP || song_edit || surface_on || picker_on()) return false;
+    if (mode != MODE_STEP || song_edit || picker_on()) return false;
     return roll_pads || (roll_ready() && (roll_key_used || ms_ticks - roll_key_ms >= 150));
 }
 static void roll_update(void)
@@ -2146,22 +2490,238 @@ static void pads_up_due(void)
         }
 }
 
+/* ---------- ORC mode = HOST mode (v0.33, hostm.h) ----------
+   The ORC owns the pads, buttons, knobs, SELECT and the screen; the sequencer above keeps playing (play_step never
+   touches a light or the screen). While it is on: hostm_events replaces handle_events (every press goes to the ORC as
+   SysEx 22 / 23, nothing reaches the sequencer's controls), paint() and render() are skipped (the ORC's colours and
+   bitmaps land straight in led_level / fb through hm_byte), and the ORC must say "still here" (21 02) at least every
+   HM_QUIET_MS or the Fire goes back to its sequencer by itself. SHIFT + BROWSER always leaves. */
+static bool hostm;                                  /* ORC mode is on */
+static bool hostm_flush;                            /* the ORC changed the screen: send fb when the OLED is free */
+static uint32_t hostm_seen;                         /* ms_ticks of the host's last 21 */
+static uint8_t hostm_eat[(IN_COUNT + 7) / 8];       /* inputs that were down when ORC mode began: their release is not sent */
+
+static void hostm_send(uint8_t cmd, uint8_t a, uint8_t b)
+{
+    if (!tud_midi_mounted()) return;
+    uint8_t m[9] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, cmd, (uint8_t)(a & 0x7F), (uint8_t)(b & 0x7F), 0xF7};
+    tud_midi_stream_write(0, m, sizeof m);
+}
+static void hostm_say(void)                         /* 21 <0|1>: the state now (sent on every change and as the answer to a 21) */
+{
+    if (!tud_midi_mounted()) return;
+    uint8_t m[8] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, 0x21, hostm, 0xF7};
+    tud_midi_stream_write(0, m, sizeof m);
+}
+static void hostm_enter(void)
+{
+    if (hostm) return;
+    if (paintm || dawm) { hostm_say(); return; }    /* v0.37 / v0.38b: never over PAINT or DAW mode (the ORC hears "off"; under
+                                                       DAW mode a touched fader would stay touched in the DAW all along) */
+    if (!tud_midi_mounted()) { menu_toast_set("no ORC connected"); return; }
+    menu_on = menu_edit = false; menu_grp = 0; menu_sel = 0;
+    /* let go of everything the sequencer's own controls were holding: their releases will go to the ORC, not here */
+    for (int pad = 0; pad < 64; pad++) {
+        if (roll_pads >> pad & 1) roll_release(pad);
+        live_release(pad);
+    }
+    up_wait = 0;
+    if (uni_ed || uni_copy_src >= 0 || uni_unsaved()) uni_edit_end();
+    uni_held = 0; uni_latch_off(-1);
+    song_edit = false; trkvol = false;
+    held_t = held_s = -1; held_pad = -1; held_row = -1; held_row_t = -1; row_consumed = 0;
+    led_dual = 1;                                   /* v0.34b: TIM4 runs the short LED slot from its next pass on */
+    hostm = true; hostm_seen = ms_ticks;
+    memset(hostm_eat, 0, sizeof hostm_eat);         /* what is down right now was pressed for the sequencer (SELECT on the menu
+                                                       row, a held SHIFT): the ORC never saw the press, so it gets no release */
+    for (int i = 0; i < IN_COUNT; i++) if (fire_held(i)) hostm_eat[i >> 3] |= (uint8_t)(1u << (i & 7));
+    hm_reset();
+    leds_clear();
+    hm_buttons();
+    draw_clear();                                   /* shown until the ORC's first screen arrives */
+    draw_text(0, 0, "ORC mode", 2);
+    draw_text(0, 24, "waiting for the ORC", 1);
+    draw_text(0, 46, "SHIFT + BROWSER", 1);
+    draw_text(0, 55, "= back to the seq", 1);
+    hostm_flush = true;
+    hostm_say();
+}
+static void hostm_leave(const char *why)
+{
+    if (!hostm) return;
+    hostm = false; hostm_flush = false;
+    led_dual = 0;                                   /* v0.34b: one LED slot again (the sequencer lights both alike) */
+    leds_clear();
+    cat(status_line, why);
+    dirty = true;                                   /* paint() + render() draw the sequencer again */
+    hostm_say();
+}
+static void menu_host_now(void) { hostm_enter(); }
+
+/* ---------- PAINT mode (v0.37, paint.h): "for kids and art's sake" (the owner, 2026-11-12) ----------
+   Tap a pad = paint it the picked colour (again = wipe it). Hold SHIFT = the palette on the pads; tap one to pick it.
+   MUTE row buttons = the four saved paintings: tap = load, hold PAINT_HOLD_MS = save. SHIFT + STOP = clear the canvas,
+   SHIFT + BROWSER = back to the sequencer, which keeps playing underneath. Colours go through ORC mode's curve (hm_duty),
+   so the second LED slot runs (led_dual) as in ORC mode. No computer needed. */
+static void pm_slot_msg(const char *what, int s)
+{
+    char *o = cat(status_line, what);
+    *o++ = (char)('1' + s); *o = 0;
+    dirty = true;
+}
+static void pm_save(int s)
+{
+    if (saving_kind == KIND_PAINT(s) && store2_busy_kind() == KIND_PAINT(s)) { store2_cancel(); saving_kind = -1; }   /* its bytes change now */
+    memcpy(paint_saved[s], paint_cv, PAINT_LEN);
+    paint_has |= (uint8_t)(1u << s);
+    paint_pend |= (uint8_t)(1u << s);
+    if (!save_run) { saver_start(); save_paint_only = G.autosave_off && !save_forced_run; }   /* (written a few words a pass;
+                                                       v0.38b: with AUTOSAVE off, never the sequencer's unsaved edits too) */
+    pm_slot_msg("saved in ", s);
+}
+static void pm_load(int s)
+{
+    if (!(paint_has >> s & 1)) { pm_slot_msg("nothing in ", s); return; }
+    memcpy(paint_cv, paint_saved[s], PAINT_LEN);
+    pm_slot_msg("painting ", s);
+}
+static void paintm_enter(void)
+{
+    if (paintm || hostm || dawm) return;
+    menu_on = menu_edit = false; menu_grp = 0; menu_sel = 0;
+    for (int pad = 0; pad < 64; pad++) {            /* let go of everything the sequencer's own controls were holding */
+        if (roll_pads >> pad & 1) roll_release(pad);
+        live_release(pad);
+    }
+    up_wait = 0;
+    if (uni_ed || uni_copy_src >= 0 || uni_unsaved()) uni_edit_end();
+    uni_held = 0; uni_latch_off(-1);
+    song_edit = false; trkvol = false;
+    held_t = held_s = -1; held_pad = -1; held_row = -1; held_row_t = -1; row_consumed = 0;
+    paint_btn_init(&paint_b);
+    led_dual = 1;                                   /* the short LED slot, as ORC mode (hm_duty splits each colour into both) */
+    paintm = true;
+    leds_clear();
+    cat(status_line, "tap pads to paint");
+    dirty = true;
+}
+static void paintm_leave(void)
+{
+    if (!paintm) return;
+    paintm = false;
+    led_dual = 0;
+    leds_clear();
+    status_brief("paint off");                      /* v0.37d: gone again after 2 s */
+    dirty = true;                                   /* paint() + render() draw the sequencer again */
+}
+static void menu_paint_now(void) { paintm_enter(); }
+
+static void __attribute__((noinline)) paintm_events(void)
+{
+    rin_tick(&rin, ms_ticks);                       /* the host's remote input (20) works here too (the bench tests) */
+    int e, s = 0;
+    while ((e = fire_event()) >= 0) {
+        if (hm_exit(e, fire_held(IN_SHIFT))) { paintm_leave(); return; }   /* SHIFT + BROWSER: out */
+        int idx = e & 0x7F, pad = pad_of_input(idx);
+        bool down = e & 0x80;
+        if (pad >= 0) {
+            if (!down) continue;
+            if (fire_held(IN_SHIFT)) paint_cur = (uint8_t)paint_swatch(pad);   /* the palette: pick */
+            else paint_tap(paint_cv, pad, paint_cur);                           /* paint, or wipe the same colour */
+            dirty = true;
+            continue;
+        }
+        int r = -1;
+        for (int i = 0; i < 4; i++) if (idx == IN_ROWBTN[i]) r = i;
+        if (r >= 0) {
+            int a = paint_btn(&paint_b, r, down, ms_ticks, &s);
+            if (a == PB_LOAD) pm_load(s); else if (a == PB_SAVE) pm_save(s);
+            continue;
+        }
+        if (idx == IN_STOP && down && fire_held(IN_SHIFT)) { memset(paint_cv, 0, sizeof paint_cv); cat(status_line, "cleared"); }
+        dirty = true;                               /* (SHIFT shows / hides the palette) */
+    }
+    if (paint_btn_tick(&paint_b, ms_ticks, &s) == PB_SAVE) pm_save(s);   /* held long enough: saved while still down */
+    (void)fire_encoder_take();                      /* the knobs do nothing here */
+    for (int k = 0; k < 4; k++) (void)fire_knob_take(k);
+    if (t4_gap_us) { int w = (int)((t4_gap_us * 256u + 250u) / 500u); if (w != hm_weight()) { hm_set_weight(w); dirty = true; } }   /* as ORC mode */
+}
+
+static void __attribute__((noinline)) pm_paint(void)
+{
+    bool pal = fire_held(IN_SHIFT);
+    for (int pad = 0; pad < PAINT_PADS; pad++) {
+        uint8_t rgb[3];
+        paint_pad_rgb(paint_cv, pad, paint_cur, pal, rgb);
+        for (int j = 0; j < 3; j++) {
+            uint8_t m, f;
+            hm_duty(rgb[j], &m, &f);
+            int i = led_pad(pad / 16, pad % 16, j);
+            led_level[i] = m; led_fine[i] = f;
+        }
+    }
+    for (int r = 0; r < 4; r++) { led_set(LED_ROW_G[r], paint_has >> r & 1 ? 7 : 1); led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0); }
+    led_set(LED_SHIFT_Y, pal ? 7 : 1);
+    led_set(LED_BROWSER, 1);
+}
+static void __attribute__((noinline)) pm_screen(void)
+{
+    char buf[24];
+    draw_text(0, 0, "Paint", 2);
+    draw_text(66, 4, "SH+BRW=out", 1);
+    cat(cat(buf, "colour: "), PAINT_NAME[paint_cur & (PAINT_COLS - 1)]);
+    draw_text(0, 18, buf, 1);
+    draw_text(0, 28, status_line, 1);
+    draw_text(0, 38, "SHIFT = colours", 1);
+    draw_text(0, 47, "SHIFT+STOP = clear", 1);
+    draw_text(0, 56, "row:load  hold:save", 1);
+}
+
+static void __attribute__((noinline)) hostm_events(void)
+{
+    rin_tick(&rin, ms_ticks);                       /* the host's remote input (20) works here too: its presses go the same way */
+    int e;
+    while ((e = fire_event()) >= 0) {
+        if (hm_exit(e, fire_held(IN_SHIFT))) { hostm_leave("ORC off"); return; }   /* SHIFT + BROWSER: never sent */
+        int ei = e & 0x7F;
+        if (ei < IN_COUNT && (hostm_eat[ei >> 3] >> (ei & 7) & 1)) {              /* down since before ORC mode */
+            hostm_eat[ei >> 3] &= (uint8_t)~(1u << (ei & 7));
+            if (!(e & 0x80)) continue;              /* its release: not the ORC's (a new press of it is) */
+        }
+        uint8_t m[2];
+        if (hm_input(e, m)) hostm_send(0x22, m[0], m[1]);
+    }
+    int d = fire_encoder_take();
+    if (d) hostm_send(0x23, 4, hm_rel(d));
+    for (int k = 0; k < 4; k++) {
+        d = fire_knob_take(k);
+        if (d) hostm_send(0x23, (uint8_t)k, hm_rel(d));
+    }
+    if (hm_quiet(ms_ticks, hostm_seen)) { hostm_leave("ORC gone"); return; }
+    /* v0.34b: the short slot's share of a pass, from its MEASURED length (67 us on the owner's Fire = 34 / 256, the
+       default). Measured only while the slot runs, so it is taken here, a pass or more after ORC mode began. */
+    if (t4_gap_us) { int w = (int)((t4_gap_us * 256u + 250u) / 500u); if (w != hm_weight()) hm_set_weight(w); }
+}
+
 static void __attribute__((noinline)) handle_events(uint32_t now)
 {
+    rin_tick(&rin, ms_ticks);                       /* v0.31r: the host's remote input went quiet: its held inputs are released (events below) */
     check_hold();
     pads_up_due();
+    /* v0.29c: a knob turned while a row button is held counts as "turned" BEFORE the events below, which can include that
+       button's release. The knob loop runs after the events, so a turn right before letting go used to look like a plain tap
+       and muted the track (the owner, 2026-10-25). */
+    if (held_row >= 0) for (int k = 0; k < 4; k++) if (fire_knob_pending(k)) held_row_turned = true;
     int e;
     while ((e = fire_event()) >= 0) {
         int idx = e & 0x7F;
         bool down = e & 0x80;
         int pad = pad_of_input(idx);
-        lt_input_ms = ms_ticks;
         if (pad >= 0 && (up_wait >> pad & 1)) {     /* a pad inside its release hold-off */
             if (down) up_wait &= ~((uint64_t)1 << pad);   /* back down: the same hit goes on, nothing sent */
             else up_ms[pad] = ms_ticks;
             continue;
         }
-        if (pad >= 0 && !down && (lt_eat >> pad & 1)) { lt_eat &= ~((uint64_t)1 << pad); continue; }   /* the release of a press that only woke the pads */
         if (down && overlay_event(idx, pad)) continue;   /* the menu, or lights showing: BROWSER, and the wake-up touch */
         if (pad >= 0 && !down && live[pad].on) {    /* a live pad let go: its release counts once it stays up (above) */
             if (pad_hold_ms()) { up_wait |= (uint64_t)1 << pad; up_ms[pad] = ms_ticks; }
@@ -2174,14 +2734,6 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             continue;
         }
         if (pad >= 0 && down && (roll_ready() || (roll_pads && roll_shown()))) { roll_press(pad); continue; }   /* KNOB MODE held (or a roll held): the pads are the roller */
-        if (pad >= 0 && surface_on) {               /* the ORC surface: a surface message, no MIDI channel (v0.21) */
-            if (!down) continue;                    /* (the release is handled above, by live[]) */
-            uint8_t vel = fire_held(IN_SHIFT) ? LIVE_ACCENT : LIVE_VEL;
-            surf_send(pad, vel);
-            live[pad].note = (uint8_t)pad; live[pad].chan = 0; live[pad].keys = false; live[pad].sx = true; live[pad].cc = false; live[pad].on = true;
-            dirty = true;
-            continue;
-        }
         if (pad >= 0 && picker_on()) {              /* the pattern picker: tap a pattern (top two rows) */
             if (!down) continue;
             if (pad >= 32) continue;
@@ -2199,10 +2751,50 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             if (down) trk_level_set(vtrack(view_top + pad / 16), ctl_trk_pad_level(pad % 16));
             continue;
         }
-        if (pad >= 0 && mode == MODE_FADER) {       /* tap a column: that fader's level (0 left .. 127 right) */
+        if (pad >= 0 && mode == MODE_UNI) {         /* v0.31 UNIVERSAL: the page's pads (a live pad's release was handled above) */
+            uint64_t bit = (uint64_t)1 << pad;
+            if (!down) { uni_held &= ~bit; dirty = true; continue; }
+            int pg = G.uni_page;
+            if (fire_held(UNI_EDIT_BTN)) {          /* ALT held: edit */
+                int src = uni_copy_src;
+                if (src >= 0 && src != pad && fire_held(pad_of_input(src))) {   /* ALT + hold A, tap B: B = A (pad_of_input is its own inverse) */
+                    const uint8_t *se = uni_entry(pg, uni_pad_key(src, uni_ed_layer));
+                    uint8_t e[UNI_ENT] = {0};
+                    if (se) { memcpy(e, se, UNI_ENT); e[0] = (uint8_t)pad; }
+                    if (uni_set(pg, uni_pad_key(pad, uni_ed_layer), e, !se)) { char *o = cat(status_line, "copy > "); o = cat_int(o, pad / 16 + 1); o = cat(o, "-"); cat_int(o, pad % 16 + 1); }
+                    dirty = true;
+                    continue;
+                }
+                uni_ed = 1; uni_ed_idx = pad; uni_ed_layer = fire_held(UNI_LAYER_BTN) ? UL_SHIFT : UL_BASE; uni_ed_kpage = 0;
+                uni_copy_src = pad;                 /* (and it plays below, so you hear what it does) */
+            }
+            int ly = fire_held(UNI_LAYER_BTN) ? UL_SHIFT : UL_BASE;
+            uni_pad_t p;
+            if (!uni_pad_get(pg, pad, &ly, &p)) { dirty = true; continue; }
+            uint8_t m[3], tg = (uint8_t)(uni_tog[pg][ly] >> pad & 1);
+            if (p.type == UT_LATCH) {               /* a note latch: on, or exactly the note it sent off (uni_latch_press) */
+                int nl = uni_latch_press(uni_lat, uni_pad_key(pad, ly), p, m);
+                if (!nl) cat(status_line, "16 latched");
+                midi_sendn(m, nl);
+                uni_held |= bit;
+                dirty = true;
+                continue;
+            }
+            int n, rel = uni_press(p, &tg, m, &n);
+            uni_tog[pg][ly] = (uni_tog[pg][ly] & ~bit) | ((uint64_t)tg << pad);
+            midi_sendn(m, n);
+            if (rel != UREL_NONE) {                 /* a note / CC hold: its release ends it (live_release), whatever happens meanwhile */
+                live[pad].note = p.num; live[pad].chan = p.ch; live[pad].keys = false;
+                live[pad].cc = rel == UREL_CC; live[pad].off = p.off; live[pad].on = true;
+            } else uni_held |= bit;
+            dirty = true;
+            continue;
+        }
+        if (pad >= 0 && fader_mode()) {             /* tap a column: that fader's level (0 left .. 127 right); FADERS or the DAW page */
             if (!down) continue;
-            int f = fad_top + pad / 16;
-            if (f < G.fad_n) fader_set(f, ((pad % 16) * 127 + 7) / 15);
+            fset_t s = fset();
+            int f = *s.top + pad / 16;
+            if (f < s.n) fader_set(f, ((pad % 16) * 127 + 7) / 15);
             continue;
         }
         if (pad >= 0 && mode != MODE_STEP) {
@@ -2213,7 +2805,7 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
                 if (ty == MR_NONE) continue;
                 uint8_t ch = MPC_PANEL_CH - 1, v = MPCREM[pad].val;
                 midi_send3((uint8_t)((ty == MR_CC ? 0xB0 : 0x90) | ch), v, 127);
-                live[pad].note = v; live[pad].chan = ch; live[pad].keys = false; live[pad].sx = false; live[pad].cc = ty == MR_CC; live[pad].on = true;
+                live[pad].note = v; live[pad].chan = ch; live[pad].keys = false; live[pad].cc = ty == MR_CC; live[pad].off = 0; live[pad].on = true;
                 dirty = true;
                 continue;
             }
@@ -2235,7 +2827,7 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
                 if (rec_arm) record_hit(note, (uint8_t)(ch + 1), lv, now);
             }
             midi_send3((uint8_t)(0x90 | ch), note, vel);
-            live[pad].note = note; live[pad].chan = ch; live[pad].keys = mode == MODE_NOTE; live[pad].sx = false; live[pad].cc = false; live[pad].on = true;
+            live[pad].note = note; live[pad].chan = ch; live[pad].keys = mode == MODE_NOTE; live[pad].cc = false; live[pad].on = true;
             dirty = true;
             continue;
         }
@@ -2284,6 +2876,11 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
                 if (lv == LV_OFF) continue;
                 steps_set_byte(CURPAT, t, s, (uint8_t)((st & ~3) | (lv == LV_ACCENT ? LV_SOFT : lv == LV_SOFT ? LV_NORMAL : LV_ACCENT)));
             } else {                                /* plain: unlit -> on now; lit -> off on release (unless edited) */
+                check_hold();                       /* a hold from another view / page is already dropped */
+                if (held_t >= 0 && ctl_step_displace(held_pad, held_pad_was_lit, held_pad_turned)) {
+                    steps_set(CURPAT, held_t, held_s, 0, 0);   /* another lit step is still down, untouched: its tap counts now (only the newest pad is remembered) */
+                    edited_pattern(CURPAT);
+                }
                 held_t = t; held_s = s; held_pad = pad; held_pad_turned = false;
                 hold_view = view_top; hold_page = page; hold_pat = CURPAT; hold_songed = song_edit;
                 held_pad_was_lit = (st & 3) != LV_OFF;
@@ -2299,6 +2896,11 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
         }
         int row = -1;
         for (int r = 0; r < VIEW_ROWS; r++) if (idx == IN_ROWBTN[r]) row = r;
+        if (row >= 0 && mode == MODE_UNI) continue; /* v0.31: rows do nothing in UNIVERSAL (a mute you could not see) */
+        if (row >= 0 && mode == MODE_DAW) {         /* v0.31d: the host owns the DAW rows: no add / remove / set-up here */
+            if (!down && held_row == row) held_row = -1;   /* (a FADERS row held across PERFORM taps lets go cleanly) */
+            continue;
+        }
         if (row >= 0 && mode == MODE_FADER) {       /* hold = set it up (knobs), tap = add (empty row), SHIFT + tap = remove */
             if (down) { held_row = row; held_row_t = fad_top + row; held_row_turned = false; }
             else if (held_row == row) {
@@ -2338,14 +2940,19 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
         }
         if (!down && idx == IN_KNOBMODE && roll_key) {   /* KNOB MODE let go: a plain tap (no roller pad) = the next knob bank */
             roll_key = false;
-            if (!roll_key_used) { uint8_t *kb = kc_bank(kctx()); *kb = (uint8_t)((*kb + 1) & 3); touched_global(); char *ko = cat(status_line, "knobs "); cat_int(ko, *kb + 1); }
+            if (roll_key_used) {}
+            else if (mode == MODE_UNI && uni_ed == 1) uni_ed_kpage ^= 1;   /* v0.31: editing a pad: its knob page 1 / 2 */
+            else if (mode == MODE_UNI) { G.uni_bank = (uint8_t)((G.uni_bank + 1) & 3); touched_global(); char *ko = cat(status_line, "knobs "); cat_int(ko, G.uni_bank + 1); }
+            else { uint8_t *kb = kc_bank(kctx()); *kb = (uint8_t)((*kb + 1) & 3); touched_global(); char *ko = cat(status_line, "knobs "); cat_int(ko, *kb + 1); }
             dirty = true;
             continue;
         }
-        if (!down && idx == IN_PERFORM && ms_ticks - perform_down_ms < 300) {   /* a tap: faders on / off */
-            if (mode == MODE_FADER) set_mode(mode_before_faders);
-            else { mode_before_faders = mode; set_mode(MODE_FADER); }
+        if (!down && idx == IN_PERFORM && ms_ticks - perform_down_ms < 300) {   /* a tap: FADERS, again the DAW page (v0.38: if the host defined one), again back */
+            int to = uni_perform_next(mode, mode_before_faders, MODE_FADER, MODE_DAW, daw.n > 0);
+            if (to == MODE_FADER) mode_before_faders = mode;
+            set_mode(to);
         }
+        if (!down && idx == UNI_EDIT_BTN && mode == MODE_UNI) uni_edit_end();   /* v0.31: ALT let go = the edit is done */
         if (!down) { if (idx == IN_SHIFT || idx == IN_ALT || idx == IN_PERFORM) dirty = true; continue; }
         switch (idx) {
         case IN_PLAY:
@@ -2373,12 +2980,14 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             break;
         case IN_STEP:                               /* v0.23: pressed again while on the steps = the track volume faders, and back */
             if (fire_held(IN_ALT)) { tap_tempo(); break; }   /* v0.24: ALT + STEP = tap tempo (a plain STEP is unchanged) */
-            if (mode == MODE_STEP && !song_edit && !surface_on && !picker_on()) { trkvol = !trkvol; held_t = held_s = -1; held_pad = -1; dirty = true; }   /* a held step means nothing in the other view */
+            if (mode == MODE_STEP && !song_edit && !picker_on()) { trkvol = !trkvol; held_t = held_s = -1; held_pad = -1; dirty = true; }   /* a held step means nothing in the other view */
             else set_mode(MODE_STEP);
             break;
-        case IN_NOTE: set_mode(MODE_NOTE); break;
+        case IN_NOTE:                               /* v0.38: pressed again while on the keyboard = UNIVERSAL, and back (was PERFORM x2) */
+            set_mode(picker_on() ? MODE_NOTE : uni_note_next(mode, MODE_NOTE, MODE_UNI));
+            break;
         case IN_DRUM:                               /* v0.28: pressed again while on the groups = the MPC remote, and back */
-            if (mode == MODE_DRUM && !surface_on && !picker_on()) { mpcrem = !mpcrem; dirty = true; }
+            if (mode == MODE_DRUM && !picker_on()) { mpcrem = !mpcrem; dirty = true; }
             else set_mode(MODE_DRUM);
             break;
         case IN_REC:
@@ -2390,6 +2999,9 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
                 int b = kb_base() + (idx == IN_GRID_R ? 1 : -1) * (fire_held(IN_SHIFT) ? 1 : 12);
                 G.kb_base = (uint8_t)(b < 1 ? 1 : b > 96 ? 96 : b);
                 touched_global();
+            } else if (mode == MODE_UNI) {           /* v0.31: page 1-8 (an edit under way ends first) */
+                int np = G.uni_page + (idx == IN_GRID_R ? 1 : -1);
+                if (np >= 0 && np < UNI_PAGES) { if (uni_ed || uni_copy_src >= 0) uni_edit_end(); uni_latch_off(-1); G.uni_page = (uint8_t)np; touched_global(); }
             } else if (mode == MODE_STEP) {
                 if (idx == IN_GRID_L && page > 0) page--;
                 if (idx == IN_GRID_R && page < PAGES - 1) page++;
@@ -2418,9 +3030,7 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
     }
     int d = fire_encoder_take();
     if (d) {
-        lt_input_ms = ms_ticks;
         if (menu_on) menu_turn(d);                  /* the menu: SELECT scrolls / changes the value */
-        else if (lt_on && !fire_held(IN_SHIFT)) lights_next(d);   /* lights: SELECT = another show */
         else if (fire_held(IN_SHIFT)) {             /* SHIFT + SELECT: tempo (with ALT: x10) */
             int b = BPM + d * (fire_held(IN_ALT) ? 10 : 1);
             BPM = (uint16_t)(b < 40 ? 40 : b > 300 ? 300 : b);
@@ -2429,8 +3039,8 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             int t = kb_track(), c = tchan(t) + d;
             G.m_chan[t - DTRACKS] = (uint8_t)(c < 1 ? 1 : c > 16 ? 16 : c);
             edited_global();
-        } else if (mode == MODE_FADER) {
-            scroll_faders(d);                       /* SELECT: scroll faders */
+        } else if (fader_mode()) {
+            scroll_faders(d);                       /* SELECT: scroll faders (the DAW page: past its ends = 1E, another bank) */
         } else if (mode == MODE_NOTE) {             /* NOTE mode: SELECT = which melodic track it plays */
             int k = G.kb_track % MTRACKS + d;
             G.kb_track = (uint8_t)(k < 0 ? 0 : k > MTRACKS - 1 ? MTRACKS - 1 : k);
@@ -2444,9 +3054,7 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
     for (int k = 0; k < 4; k++) {
         int v = fire_knob_take(k);
         if (!v) continue;
-        lt_input_ms = ms_ticks;
         if (menu_on) continue;                      /* the menu uses SELECT only */
-        if (lt_on) { if (k == 0) lights_speed(v); continue; }   /* lights: knob 1 = speed */
         if (picker_on()) {                          /* picker: knob 1 = the picked pattern's colour */
             if (k == 0) { pat_recolour(picker_sel, v); picker_used = true; }
             continue;
@@ -2455,12 +3063,13 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
             if (G.song_pat[song_sel]) pat_recolour(G.song_pat[song_sel] - 1, v);
             continue;
         }
-        if (mode == MODE_STEP && trkvol && held_row < 0 && !surface_on) {   /* knob k = row k's track volume, fine */
+        if (mode == MODE_STEP && trkvol && held_row < 0) {   /* knob k = row k's track volume, fine */
             trk_level_set(vtrack(view_top + k), trk_level(vtrack(view_top + k)) + v);
             continue;
         }
-        if (mode == MODE_FADER) {
-            if (held_row >= 0) {                    /* setting up the held fader: CC, channel, colour */
+        if (fader_mode()) {
+            fset_t s = fset();
+            if (!s.daw && held_row >= 0) {          /* setting up the held fader: CC, channel, colour (FADERS only) */
                 int f = held_row_t;
                 if (f >= G.fad_n || k == 3) continue;
                 held_row_turned = true;
@@ -2468,7 +3077,45 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
                 else if (k == 1) { int c = G.fad_ch[f] + v; G.fad_ch[f] = (uint8_t)(c < 1 ? 1 : c > 16 ? 16 : c); }
                 else { int c = G.fad_col[f] + v; G.fad_col[f] = (uint8_t)(c < 0 ? 0 : c > 15 ? 15 : c); }
                 dirty = true; edited_global();
-            } else if (fad_top + k < G.fad_n) fader_set(fad_top + k, G.fad_val[fad_top + k] + v);   /* knob k = row k's fader, fine */
+            } else if (*s.top + k < s.n) {          /* knob k = row k's fader, fine */
+                if (s.daw) daw_knob(k, *s.top + k, v);   /* v0.31f: the DAW page's full 14-bit resolution */
+                else fader_set(*s.top + k, s.val[*s.top + k] + v);
+            }
+            continue;
+        }
+        if (mode == MODE_UNI) {                     /* v0.31 UNIVERSAL */
+            int pg = G.uni_page;
+            if (uni_ed == 1) {                      /* editing a pad: knob k = one of its settings (uni_edit_pad) */
+                int key = uni_pad_key(uni_ed_idx, uni_ed_layer);
+                const uint8_t *e = uni_entry(pg, key);
+                uni_pad_t p = e ? uni_pad_of(e) : uni_pad_blank();
+                uni_edit_pad(&p, uni_ed_kpage, k, v, uni_ed_layer);
+                uint8_t ne[UNI_ENT];
+                uni_pad_enc(ne, uni_ed_idx, uni_ed_layer, p);
+                if (p.type != UT_OFF) uni_set(pg, key, ne, false);
+                else if (e) uni_set(pg, key, ne, true);   /* type "off" = the pad is cleared */
+                dirty = true;
+                continue;
+            }
+            if (uni_ed == 2 || fire_held(UNI_EDIT_BTN)) {   /* ALT + turn a knob: edit it (that first turn only picks it) */
+                if (uni_ed != 2) { uni_ed = 2; uni_ed_idx = (G.uni_bank & 3) * 4 + k; dirty = true; continue; }
+                int key = uni_knob_key(uni_ed_idx);
+                const uint8_t *e = uni_entry(pg, key);
+                uni_knob_t kn = e ? uni_knob_of(e) : uni_knob_blank();
+                uni_edit_knob(&kn, k, v);
+                uint8_t ne[UNI_ENT];
+                uni_knob_enc(ne, uni_ed_idx, kn);
+                if (kn.type != UK_NONE) uni_set(pg, key, ne, false);
+                else if (e) uni_set(pg, key, ne, true);
+                dirty = true;
+                continue;
+            }
+            int slot = (G.uni_bank & 3) * 4 + k;    /* playing: the bank's knob sends its CC / pitch bend */
+            uni_knob_t kn;
+            if (!uni_knob_get(pg, slot, &kn)) continue;
+            uint8_t m[3];
+            midi_sendn(m, uni_knob_turn(kn, &uni_kv[pg][slot], v, m));
+            uni_last_knob = slot; dirty = true;
             continue;
         }
         if (mode == MODE_DRUM && !mpcrem && fire_held(IN_ALT) && k < 2) {   /* editing a group: channel, pad 1's note */
@@ -2579,6 +3226,20 @@ static void __attribute__((noinline)) handle_events(uint32_t now)
 /* ---------- MIDI in ---------- */
 
 static crash_info_t crash_boot;                     /* what the backup registers held at boot (the last crash, if any) */
+/* v0.39 the last crash also lives in FLASH (store2 kind 61). The backup registers survive a reset but not a power-off
+   (the Fire has no backup battery), so a crash on a computer, with no Pi to save it at once, vanished when the Fire was
+   unplugged. Record: a magic word, then crash_info_t's first 15 words (valid .. stack_min). At boot a crash in the
+   registers that flash does not hold yet is copied there (alone, at a quiet moment); no crash in the registers but one
+   in flash = the flash copy is the crash on record (About, 06). 06 01 clears both. */
+#define CRASH_REC_MAGIC 0x31465243u                 /* "CRF1" */
+#define CRASH_REC_WORDS 15
+typedef struct { uint32_t magic; uint32_t w[CRASH_REC_WORDS]; } crash_rec_t;
+_Static_assert(sizeof(crash_rec_t) == CP_CRASH_LEN && KIND_CRASH == CP_KIND_CRASH && KIND_CRASH >= KIND_PAINT(PAINT_SLOTS)
+               && KIND_CRASH < S2_KINDS, "the crash record's size and kind");
+_Static_assert(offsetof(crash_info_t, stack_min) == offsetof(crash_info_t, valid) + 4 * (CRASH_REC_WORDS - 1),
+               "valid .. stack_min are the 15 words the record keeps");
+static crash_rec_t crash_rec;                       /* what flash holds (or is about to) */
+static bool crash_pend;                             /* crash_rec waits to be written */
 static void crash_load(crash_info_t *ci)
 {
     memset(ci, 0, sizeof *ci);
@@ -2596,24 +3257,18 @@ static bool sx_on;
 /* Host protocol (the Pi -> the Fire). SysEx, the non-commercial id 7D, then "ORC" and a command:
      F0 7D 4F 52 43 <cmd> <data...> F7
      00                hello: the Fire answers F0 7D 4F 52 43 00 <version> F7 (so a host can find it)
-     01 <16 x 0-127>   VU column levels (left to right). Bars jump up to a level and fall on their own, so a
-                       host can send raw levels ~30 times a second. They only SHOW while host lights are on.
-     02 <0|1>          host lights off / on (the VU bars take the pads; a touch on the Fire ends them, then the
-                       host must ask again; they also end by themselves if levels stop for 3 s)
-     03 <0-127>        light speed (64 = x1), saved like the menu setting
-     04 <0-12>         show that effect (like Lights now); does not change the saved setting
-     05 <text...>      scroll that message across the pads (printable ASCII, up to 32 characters, 3x4 font)
+     01 / 02           (the PI VU bars' levels / on-off until v0.35: accepted and ignored since v0.36)
+     03 / 04 / 05      (light speed / a show / scrolling text until v0.31: ignored like any unknown command)
      06 [1]            the last crash on record (cause, PC, LR, stage ...: crash.h); 06 01 also clears it
-   Anything else is ignored. */
-#define HOST_VERSION 1
-/* The host shows an effect / text of its own: it stays (CYCLE leaves it alone) until the Fire's user or the host changes it. */
-static void host_pin(int cur)
-{
-    if (!lt_on) lights_on(true, false);
-    lt_host = false; lt_manual = true; lt_cur = cur; lt_cycle_ms = ms_ticks;
-    lt_by_host = lt_pinned = true;
-}
-
+     0D <0-31>         queue a pattern (song mode: a slot) for the next bar, like PATTERN up / down (v0.30, ctl.h)
+     0E <0|1>          bar messages (0F, Fire -> host) off / on; off at power-on (v0.30, ctl.h)
+     10-15             UNIVERSAL pages (v0.31): write (begin / chunk / commit), read, list, clear (ctl.h, uni.h, USER_GUIDE)
+     1A <n 0-9>        the DAW page (v0.31d) has n rows, 0 = none; rows from n on are cleared (RAM only, never saved)
+     1B <row> <R> <G> <B> <level> <name 0-8>   one DAW row in full;   1C <row> <level>   a DAW row's level only
+                       (Fire -> host: 1D <row> <level> = the user moved a DAW row; 1E <0|1> = scrolled past the first / last row)
+   Anything else is ignored. 07-0C: USER_GUIDE "The host protocol". Version 2 = v0.30 (0D / 0E / 0F), 3 = v0.31 (10-15),
+   5 = v0.31d (1A-1E; 4 was the rolled-back v0.32's 18 / 19 and is never used). */
+#define HOST_VERSION 9                              /* 9 = v0.34: the short LED slot (about 200 brightness steps), + 25; 8 = v0.33: + 21-24 ORC mode (hostm.h); 7 = v0.31r: + 20 remote input; 03 / 04 / 05 (light shows) gone */
 #ifdef CRASH_TEST
 static void __attribute__((noinline)) bench_smash(void)   /* overruns its own buffer: the canary must catch it */
 {
@@ -2639,6 +3294,9 @@ static void __attribute__((noinline)) host_cmd(const uint8_t *p, unsigned n)
             DWT->FUNCTION0 = 0;
             NVIC_EnableIRQ(TIM4_IRQn);
         }
+        if (p[1] == 6) tim4_bench = 3;              /* TIM4's SP moved by 8 (kind 3): its stack check must record it */
+        if (p[1] == 7) tim4_bench = 5;              /* TIM4's saved return overwritten (kind 5) */
+        if (p[1] == 8) tim4_bench = 1;              /* v0.33b: TIM4 handed 0xFFFFFFFF as its entry address: noted, NO reset */
         if (p[1] == 4) {                            /* jump into RAM (two NOPs on the stack): the MPU must stop it at once */
             volatile uint16_t code[4] = {0xBF00, 0xBF00, 0x4770, 0xBF00};   /* nop, nop, bx lr */
             ((void (*)(void))((uint32_t)code | 1u))();
@@ -2654,38 +3312,30 @@ static void __attribute__((noinline)) host_cmd(const uint8_t *p, unsigned n)
             tud_midi_stream_write(0, R, sizeof R);
         }
         break;
-    case HC_LEVELS:
-        lights_host(h.data); lt_host_ms = ms_ticks;
-        if (ctl_host_reengage(lt_on, lt_host, show_is_host())) { lt_host = true; lt_cur = LT_M_HOST; dirty = true; }   /* PI VU is back */
-        break;
+    case HC_LEVELS:                                 /* 01 / 02: the PI VU bars (gone in v0.36): ignored */
     case HC_LIGHTS:
-        if (h.arg == 1) {
-            lt_host_ms = ms_ticks;
-            if (!lt_on) lights_on(true, true);
-            else { lt_host = lt_manual = true; lt_cur = LT_M_HOST; }
-            lt_by_host = true; lt_pinned = false;
-        } else if (ctl_host_stop_ends(lt_on, lt_host, lt_by_host)) lights_off();
         break;
-    case HC_SPEED:
-        G.lt_speed = (uint8_t)h.arg; touched_global();
-        break;
-    case HC_EFFECT:
-        host_pin(h.arg);
-        break;
-    case HC_TEXT:                                   /* a message: shown scrolling on the pads (up to 32 characters) */
-        if (!h.len) break;                          /* an empty message would only blank the pads */
-        lights_set_text((const char *)h.data, (int)h.len);
-        host_pin(LT_M_TEXT);
-        break;
+    /* 03 / 04 / 05 (light speed, a show, scrolling text) are gone since v0.31r: ignored like any unknown command */
     case HC_CRASH:                                  /* the last crash on record (06), and clear it (06 01) */
         if (tud_midi_mounted()) {
             uint8_t msg[CRASH_REPLY_LEN + 2];
             msg[0] = 0xF0;
+            bool tn = t4_note.magic == T4_NOTE_MAGIC;   /* the TIM4 check note is LIVE (this run + any before the reset) */
+            crash_boot.t4_count = tn ? t4_note.count : 0; crash_boot.t4_ms = tn ? t4_note.ms : 0;
+            crash_boot.t4_kind = tn ? t4_note.kind : 0; crash_boot.t4_seen = tn ? t4_note.seen : 0;
+            crash_boot.t4_want = tn ? t4_note.want : 0; crash_boot.t4_exc = tn ? t4_note.exc : 0;
             crash_reply(&crash_boot, msg + 1);
             msg[CRASH_REPLY_LEN + 1] = 0xF7;
             tud_midi_stream_write(0, msg, sizeof msg);
         }
-        if (h.arg == 1) { RTC->BKP1R = 0; RTC->BKP11R = 0; memset(&crash_boot, 0, sizeof crash_boot); crash_snap.magic = 0; }
+        if (h.arg == 1) {
+            RTC->BKP1R = 0; RTC->BKP11R = 0; memset(&crash_boot, 0, sizeof crash_boot); crash_snap.magic = 0; t4_note.magic = 0;
+            if (crash_rec.w[0]) {                   /* v0.39: flash's copy is cleared too (a cleared record: valid 0) */
+                if (saving_kind == KIND_CRASH && store2_busy_kind() == KIND_CRASH) { store2_cancel(); saving_kind = -1; }
+                memset(crash_rec.w, 0, sizeof crash_rec.w); crash_rec.magic = CRASH_REC_MAGIC; crash_pend = true;
+                if (!save_run) { saver_start(); save_paint_only = G.autosave_off && !save_forced_run; }
+            }
+        }
         break;
     case HC_PEEK:                                   /* read one word (09): RAM, flash, peripheral / core registers */
         if (tud_midi_mounted()) {
@@ -2696,17 +3346,8 @@ static void __attribute__((noinline)) host_cmd(const uint8_t *p, unsigned n)
             tud_midi_stream_write(0, msg, sizeof msg);
         }
         break;
-    case HC_COLORS:                                 /* 0A: pad colours for the surface (kept even while it is off) */
-        for (unsigned i = 0; i < h.len; i++)
-            for (int j = 0; j < 3; j++) surf_rgb[h.arg + (int)i][j] = h.data[3 * i + (unsigned)j];
-        dirty = true;
-        break;
-    case HC_SURFACE:                                /* 0B: surface on (channel) / off */
-        if (h.arg) {
-            surf_ch = (uint8_t)(h.arg - 1); surf_known = true;
-            if (!surface_on) { surface_on = true; lights_off(); song_edit = false; trkvol = false; held_t = held_s = -1; held_pad = -1; }
-        } else surface_on = false;
-        dirty = true;
+    case HC_COLORS:                                 /* 0A / 0B: the ORC pads page is gone (v0.36): ignored */
+    case HC_SURFACE:
         break;
     case HC_STACK:                                  /* the stack around the last fault (08) */
         if (tud_midi_mounted()) {
@@ -2720,17 +3361,121 @@ static void __attribute__((noinline)) host_cmd(const uint8_t *p, unsigned n)
         break;
     case HC_STATUS:                                 /* read only: what the pads / saver are doing (host tests, debugging) */
         if (tud_midi_mounted()) {
+            uint32_t lmax = loop_max_us > 16383 ? 16383 : loop_max_us;
+            if (h.arg == 1) { loop_max_us = 0; fire_vdd_reset(); }   /* 07 01: measure from now on (v0.33b: the supply too) */
             uint32_t stack_depth = (uint32_t)&_estack - stack_low();
             if (stack_depth > 16383) stack_depth = 16383;
             const uint8_t R[] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, 0x07,
-                lt_on, (uint8_t)(lt_on ? lt_cur & 127 : 127), lt_host, lt_by_host, lt_pinned,
+                0, 127, 0, 0, 0,                    /* (the PI VU bars until v0.35: gone; 127 = no light mode) */
                 unsaved(), save_lazy_due != 0, saves_global,
                 playing, ext_playing, (uint8_t)(G.lt_mode & 127), (uint8_t)(G.lt_speed & 127), menu_on,
-                (uint8_t)(lt_frame & 127),          /* frames drawn (mod 128): moving = the lights really run */
+                0,                                  /* (PI VU frames drawn until v0.35) */
                 (uint8_t)(stack_depth >> 7 & 127), (uint8_t)(stack_depth & 127),   /* deepest stack use since boot, bytes */
-                surface_on, surf_ch,                /* v0.19: the ORC surface and its channel (0-15) */
+                0, 0,                               /* (the ORC surface + its channel until v0.35: gone) */
+                (uint8_t)(lmax >> 7 & 0x7F), (uint8_t)(lmax & 0x7F),   /* v0.31: the longest main-loop pass since boot / 07 01, us (16383 = more) */
                 0xF7};
             tud_midi_stream_write(0, R, sizeof R);
+        }
+        break;
+    case HC_QUEUE: {                                /* 0D: the PATTERN buttons' rule (pattern_step / the picker), from the host */
+        bool song = song_active();
+        int q = queued_pat;
+        int r = ctl_queue_pat(h.arg, song, song_len(), PATTERNS, playing || ext_playing, CURPAT, &q);
+        if (r == CQ_QUEUE) queued_pat = q;
+        else if (r == CQ_NOW) {
+            if (song) song_goto(h.arg);
+            else { CURPAT = (uint8_t)h.arg; queued_pat = -1; }
+        }
+        if (r != CQ_REFUSE) { dirty = true; if (!song) touched_global(); }
+        if (tud_midi_mounted()) {
+            const uint8_t R[] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, 0x0D, (uint8_t)(r != CQ_REFUSE), (uint8_t)(CURPAT & 0x7F),
+                                 (uint8_t)(queued_pat >= 0 ? queued_pat & 0x7F : CTL_NO_SLOT), (uint8_t)song, 0xF7};
+            tud_midi_stream_write(0, R, sizeof R);
+        }
+        break;
+    }
+    case HC_BARS:                                   /* 0E: bar messages (0F) off / on */
+        bar_msgs = h.arg == 1;
+        break;
+    case HC_UBEGIN: uni_host_begin(h.arg, h.len); break;   /* v0.31 UNIVERSAL pages (uni.h, USER_GUIDE) */
+    case HC_UCHUNK: uni_host_chunk((uint32_t)h.arg, h.data, h.len); break;
+    case HC_UCOMMIT: uni_host_commit((uint32_t)h.arg); break;
+    case HC_UCLEAR: uni_host_clear(h.arg); break;
+    case HC_DAWN:                                   /* 1A (v0.31d): the DAW page has n rows; 0 = gone */
+        if (dawm) { ctl_daw_count(&pi_page, h.arg); break; }   /* v0.37c: DAW mode owns the rows; the Pi's page waits aside, kept current */
+        ctl_daw_count(&daw, h.arg);
+        if (daw_top > ctl_fset_max_top(daw.n, 0, CTL_DAW_ROWS, VIEW_ROWS)) daw_top = ctl_fset_max_top(daw.n, 0, CTL_DAW_ROWS, VIEW_ROWS);
+        if (mode == MODE_DAW) {
+            if (!daw.n) {                           /* removed while on screen: back to where you were before FADERS */
+                set_mode(mode_before_faders);
+            }
+            dirty = true;
+        }
+        break;
+    case HC_DAWROW:                                 /* 1B: a row in full (no echo); v0.37c: in DAW mode, to the page waiting aside */
+        if (dawm) ctl_daw_row(&pi_page, h.arg, h.data, h.len);
+        else { ctl_daw_row(&daw, h.arg, h.data, h.len); daw_dirty(h.arg); }
+        break;
+    case HC_DAWLVL:                                 /* 1C: a level from the host: never sent back; v0.37c: in DAW mode, aside */
+        if (dawm) ctl_daw_level(&pi_page, h.arg, (int)h.len);
+        else if (ctl_daw_level(&daw, h.arg, (int)h.len)) daw_dirty(h.arg);
+        break;
+    case HC_INPUT: {                                /* 20: remote input (v0.31r, remote.h): answered 20 <sub> <result> <armed> */
+        int res = rin_cmd(&rin, h.arg, h.data, h.len, ms_ticks);
+        if (tud_midi_mounted()) {
+            uint8_t msg[10] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, 0x20, (uint8_t)(h.arg & 0x7F), (uint8_t)res, rin.armed, 0xF7};
+            tud_midi_stream_write(0, msg, sizeof msg);
+        }
+        break;
+    }
+    case HC_HOSTM:                                  /* 21 (v0.33): ORC mode off / on / "still here"; always answered 21 <state> */
+        if (h.arg == 1 && !hostm) { hostm_enter(); break; }       /* (enter and leave say the new state themselves) */
+        if (h.arg == 0 && hostm) { hostm_leave("ORC off"); break; }
+        if (hostm) hostm_seen = ms_ticks;
+        hostm_say();
+        break;
+    case HC_GAMMA: hm_set_gamma(h.arg); break;      /* 24 (v0.33): the pad colour curve x 10; the host repaints */
+    case HC_FINEW:                                  /* 25 (v0.34): the short LED slot. 25 <12-64> sets the share ORC mode's colours
+                                                       are split by; 25 00 only asks. Answered 25 <share> <measured slot us> <interrupt us> */
+        if (h.arg) hm_set_weight(h.arg);
+        if (tud_midi_mounted()) {
+            uint8_t m[10] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, 0x25, (uint8_t)hm_weight(), (uint8_t)(t4_gap_us & 0x7F), (uint8_t)(t4_len_us > 127 ? 127 : t4_len_us), 0xF7};
+            tud_midi_stream_write(0, m, sizeof m);
+        }
+        break;
+    case HC_UREAD:                                  /* 13: a page as the Fire plays it now (its edits not saved yet included) */
+        if (tud_midi_mounted()) {
+            uint32_t bl, off = h.len;
+            const uint8_t *b = uni_base(h.arg, &bl);
+            uint32_t len = uni_patched_len(b, bl, uni_ps, UNI_SLOTS, h.arg, UNI_ALL);
+            uint32_t n = off > len ? 0 : (len - off > UNI_CHUNK ? UNI_CHUNK : len - off);
+            uint8_t m[12 + UNI_CHUNK + 1] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, 0x13, (uint8_t)(off > len ? UR_BAD : UR_OK), (uint8_t)h.arg,
+                                             (uint8_t)(len >> 7 & 0x7F), (uint8_t)(len & 0x7F), (uint8_t)(off >> 7 & 0x7F), (uint8_t)(off & 0x7F)};
+            if (n) uni_patched_read(b, bl, uni_ps, UNI_SLOTS, h.arg, UNI_ALL, off, m + 12, n);
+            m[12 + n] = 0xF7;
+            tud_midi_stream_write(0, m, 13 + n);
+        }
+        break;
+    case HC_ULIST:                                  /* 14: every page's length, checksum and name, the budget */
+        if (tud_midi_mounted()) {
+            uint8_t m[14 + UNI_PAGES * 12 + 1];
+            uint32_t used = 0;
+            for (int p = 0; p < UNI_PAGES; p++) used += uni_size(p);
+            const uint8_t hd[14] = {0xF0, 0x7D, 0x4F, 0x52, 0x43, 0x14, UNI_PAGES, (uint8_t)(UNI_BUDGET >> 7 & 0x7F), (uint8_t)(UNI_BUDGET & 0x7F),
+                                    (uint8_t)(used >> 7 & 0x7F), (uint8_t)(used & 0x7F), (uint8_t)(uw.state ? uw.page : 127),
+                                    G.uni_page, mode == MODE_UNI};
+            memcpy(m, hd, sizeof hd);
+            for (int p = 0; p < UNI_PAGES; p++) {
+                uint8_t *q = m + 14 + 12 * p;
+                uint32_t bl;
+                const uint8_t *b = uni_base(p, &bl);
+                uni_cached(p);                      /* (length + sum cached per page change: no walk here) */
+                uint32_t len = uni_cache[p].len, sum = uni_cache[p].sum;
+                for (int i = 0; i < UNI_NAME; i++) q[4 + i] = b ? b[1 + i] : ' ';   /* (edits never change the name) */
+                q[0] = (uint8_t)(len >> 7 & 0x7F); q[1] = (uint8_t)(len & 0x7F); q[2] = (uint8_t)(sum >> 7 & 0x7F); q[3] = (uint8_t)(sum & 0x7F);
+            }
+            m[sizeof m - 1] = 0xF7;
+            tud_midi_stream_write(0, m, sizeof m);
         }
         break;
     default: break;
@@ -2763,6 +3508,7 @@ static void __attribute__((noinline)) midi_in_byte(uint8_t b, uint32_t now)
     }
     if (b == 0xFB) { ext_playing = true; dirty = true; return; }
     if (b == 0xFC) { stop(false); return; }
+    if (hostm && (hm_byte(b) & HM_OLED_DONE)) hostm_flush = true;   /* v0.33: Akai-format colours / bitmaps, of any length */
     if (b == 0xF0) { sx_on = true; sx_len = 0; }
     if (sx_on) {
         if (sx_len < sizeof sx) sx[sx_len++] = b;
@@ -2777,13 +3523,238 @@ static void __attribute__((noinline)) midi_in_byte(uint8_t b, uint32_t now)
     }
 }
 
+/* ---------- the DAW port (v0.36, USB cable 1) ----------
+   Everything for the DAW goes out as ready-made USB-MIDI packets with cable 1 in them (tud_midi_packet_write), never
+   through tud_midi_stream_write: TinyUSB keeps ONE stream state per interface, so a cable-1 message written while a
+   cable-0 SysEx is half sent would land inside it. daw_send packs one complete MIDI message (or SysEx) itself. */
+#define DAW_CABLE 1u
+static uint32_t daw_rx_packets;                     /* packets seen on the DAW port (the spike: proves the port works) */
+static void dawm_event(const daw_ev_t *ev);
+static void dawm_relock(void);
+static void daw_in_packet(const uint8_t pkt[4])
+{
+    static const uint8_t len[16] = {0, 0, 2, 3, 3, 1, 2, 3, 3, 3, 3, 3, 2, 2, 3, 1};
+    daw_rx_packets++;                               /* v0.36b: decoded even outside DAW mode, so going back in shows the DAW's state now
+                                                       (a running DAW only sends changes; v0.36a waited for one that never came) */
+    int n = len[pkt[0] & 0xF];
+    for (int i = 0; i < n; i++) {
+        daw_ev_t ev;
+        if (daw_byte(pkt[1 + i], &ev)) dawm_event(&ev);
+        if (daw_proto() != dawm_proto_seen) dawm_relock();   /* v0.38b: locked (or re-locked) by any message */
+    }
+}
+static void daw_send(const uint8_t *m, int n)
+{
+    if (n <= 0 || !tud_midi_mounted()) return;
+    uint8_t pkt[4];
+    if (m[0] != 0xF0) {                             /* a channel message: 2 or 3 bytes, CIN = the status' high nibble */
+        pkt[0] = (uint8_t)(DAW_CABLE << 4 | m[0] >> 4);
+        pkt[1] = m[0]; pkt[2] = n > 1 ? m[1] : 0; pkt[3] = n > 2 ? m[2] : 0;
+        tud_midi_packet_write(pkt);
+        return;
+    }
+    for (int i = 0; i < n; i += 3) {                /* SysEx: CIN 4 = 3 bytes going on, 5 / 6 / 7 = ends with 1 / 2 / 3 */
+        int left = n - i, k = left > 3 ? 3 : left;
+        bool end = left <= 3;
+        pkt[0] = (uint8_t)(DAW_CABLE << 4 | (end ? 4 + k : 4));
+        pkt[1] = m[i]; pkt[2] = k > 1 ? m[i + 1] : 0; pkt[3] = k > 2 ? m[i + 2] : 0;
+        tud_midi_packet_write(pkt);
+    }
+}
+void daw_out(const uint8_t *m, int n) { daw_send(m, n); }   /* daw.c's one way out: the DAW port */
+
+/* the rows' fixed colours (MCU / HUI carry none): eight hues, the master white */
+static const uint8_t DAWM_RGB[9][3] = {{7, 0, 0}, {7, 3, 0}, {6, 6, 0}, {0, 7, 0}, {0, 6, 6}, {0, 2, 7}, {4, 0, 7}, {7, 0, 5}, {5, 5, 5}};
+static void dawm_rows(int n)                        /* n rows (MCU 8 + master, HUI 8), coloured, named "1".."8" until the DAW names them */
+{
+    ctl_daw_count(&daw, 0);
+    ctl_daw_count(&daw, n);
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < 3; j++) daw.rgb[i][j] = DAWM_RGB[i][j];
+        if (i == 8) memcpy(daw.name[i], "Master", 7);
+        else { daw.name[i][0] = (char)('1' + i); daw.name[i][1] = 0; }
+    }
+    if (daw_top > ctl_fset_max_top(daw.n, 0, CTL_DAW_ROWS, VIEW_ROWS)) daw_top = 0;
+}
+static void dawm_names(void)                        /* the DAW's text -> the rows' names (MCU: the LCD's top line, 7 a strip; HUI: the 4-character strips) */
+{
+    const char *t = daw_text();
+    bool hui = daw_proto() == DAW_HUI;
+    for (int i = 0; i < 8 && i < daw.n; i++) {
+        const char *src = hui ? t + DAW_HUI_STRIP + 4 * i : t + 7 * i;
+        int len = hui ? 4 : 7, a = 0, b = len;
+        while (a < b && src[a] == ' ') a++;
+        while (b > a && src[b - 1] == ' ') b--;
+        if (a == b) continue;                       /* blank: keep the number */
+        int n = b - a > CTL_DAW_NAME ? CTL_DAW_NAME : b - a;
+        memcpy(daw.name[i], src + a, (size_t)n); daw.name[i][n] = 0;
+    }
+}
+static void dawm_event(const daw_ev_t *ev)
+{
+    dawm_seen = ms_ticks ? ms_ticks : 1;
+    if (ev->type == DE_LEVEL && ev->idx < DAW_STRIPS) dawm_lvl[ev->idx] = ev->val;
+    if (!dawm) return;                              /* the rows (shared with the Pi's DAW page) are only touched in DAW mode */
+    switch (ev->type) {
+    case DE_LEVEL: if (ev->idx < daw.n && ctl_daw_level(&daw, ev->idx, ev->val)) daw_dirty(ev->idx); break;
+    case DE_TEXT:  dawm_names(); dirty = true; break;
+    case DE_LED: case DE_DIGIT: case DE_RING: case DE_HELLO: case DE_PING: dirty = true; break;
+    default: break;
+    }
+}
+/* v0.38b: the protocol changed: rows for it (HUI has no master) */
+static void dawm_relock(void)
+{
+    if (dawm_proto_seen != DAW_AUTO) memset(dawm_lvl, 0, sizeof dawm_lvl);   /* the old protocol's levels mean nothing now */
+    dawm_proto_seen = (uint8_t)daw_proto();
+    if (!dawm) return;
+    dawm_rows(daw_proto() == DAW_HUI ? 8 : 9);
+    dawm_names();
+    for (int i = 0; i < daw.n; i++) ctl_daw_level(&daw, i, dawm_lvl[i]);
+    dirty = true;
+}
+static void dawm_press(int idx, int id) { if (daw_button(id, 1)) dawm_held[idx] = (uint8_t)(id + 1); }
+static void dawm_release(int idx) { if (dawm_held[idx]) { daw_button(dawm_held[idx] - 1, 0); dawm_held[idx] = 0; } }
+static void dawm_enter(void)
+{
+    if (dawm || hostm || paintm) return;
+    if (!tud_midi_mounted()) { menu_toast_set("no computer"); return; }
+    menu_on = menu_edit = false; menu_grp = 0; menu_sel = 0;
+    for (int pad = 0; pad < 64; pad++) {            /* let go of everything the sequencer's own controls were holding */
+        if (roll_pads >> pad & 1) roll_release(pad);
+        live_release(pad);
+    }
+    up_wait = 0;
+    if (uni_ed || uni_copy_src >= 0 || uni_unsaved()) uni_edit_end();
+    uni_held = 0; uni_latch_off(-1);
+    song_edit = false; trkvol = false;
+    held_t = held_s = -1; held_pad = -1; held_row = -1; held_row_t = -1; row_consumed = 0;
+    if (mode != MODE_FADER && mode != MODE_DAW) mode_before_faders = mode;   /* v0.38: UNIVERSAL is a place of its own (NOTE x2) */
+    pi_page = daw; pi_top = daw_top;                /* v0.37c: the Pi's DAW page waits aside (1A-1C keep it current), back on leaving */
+    dawm_rows(daw_proto() == DAW_HUI ? 8 : 9);      /* v0.36b: no daw_init here: what the DAW already said stays */
+    dawm_names();
+    for (int i = 0; i < daw.n; i++) ctl_daw_level(&daw, i, dawm_lvl[i]);
+    daw_top = 0; dawm_view = 0; dawm_half = 0;
+    dawm = true;
+    set_mode(MODE_DAW);
+    daw_announce();                                 /* MCU: the surface introduces itself; Auto / HUI: wait for the DAW */
+    dirty = true;
+}
+static void dawm_leave(void)
+{
+    if (!dawm) return;
+    for (int i = 0; i < IN_COUNT; i++) dawm_release(i);   /* v0.38b: every held DAW button let go too */
+    daw_release_all();                              /* every touched fader let go */
+    dawm = false;
+    daw = pi_page;                                  /* v0.37c: the Pi's DAW page back as it is now (it was wiped, and the Pi never resent it) */
+    daw_top = pi_top > ctl_fset_max_top(daw.n, 0, CTL_DAW_ROWS, VIEW_ROWS) ? ctl_fset_max_top(daw.n, 0, CTL_DAW_ROWS, VIEW_ROWS) : pi_top;
+    set_mode(mode_before_faders);
+    status_brief("DAW off");                        /* v0.37d: gone again after 2 s (it stayed, hiding UNIVERSAL's page name) */
+    dirty = true;
+}
+static void menu_dawm_now(void) { dawm_enter(); }
+
+static void __attribute__((noinline)) dawm_events(void)
+{
+    static const uint8_t GRP[4] = {DB_REC, DB_SOLO, DB_MUTE, DB_SELECT};
+    rin_tick(&rin, ms_ticks);                       /* the host's remote input (20) works here too (the bench tests) */
+    int e;
+    while ((e = fire_event()) >= 0) {
+        if (hm_exit(e, fire_held(IN_SHIFT))) { dawm_leave(); return; }   /* SHIFT + BROWSER: out (as ORC mode) */
+        int idx = e & 0x7F, pad = pad_of_input(idx);
+        bool down = e & 0x80;
+        if (idx >= IN_COUNT) continue;
+        if (!down) {                                /* v0.38b: a release goes to what its press sent, whatever shows now */
+            dawm_release(idx);
+            if (idx == IN_SHIFT || idx == IN_ALT) dirty = true;
+            continue;
+        }
+        if (pad >= 0) {
+            if (dawm_view) dawm_press(idx, GRP[pad / 16] + (pad % 16) / 2);   /* 8 strips, 2 pads each */
+            else {                        /* a tap: that row's level (the DAW page's own rule) */
+                int f = daw_top + pad / 16;
+                if (f < daw.n) fader_set(f, ((pad % 16) * 127 + 7) / 15);
+            }
+            continue;
+        }
+        switch (idx) {
+        case IN_PLAY:   dawm_press(idx, DB_PLAY); break;
+        case IN_STOP:   dawm_press(idx, DB_STOP); break;
+        case IN_REC:    dawm_press(idx, DB_RECORD); break;
+        case IN_PAT_UP: if (down) daw_bank(-1); break;
+        case IN_PAT_DN: if (down) daw_bank(1); break;
+        case IN_GRID_L: if (down) daw_channel(-1); break;
+        case IN_GRID_R: if (down) daw_channel(1); break;
+        case IN_STEP:   if (down) { dawm_view = 1; dirty = true; } break;
+        case IN_PERFORM: if (down) { dawm_view = 0; dirty = true; } break;
+        case IN_SELECT: if (down && dawm_view) { dawm_half ^= 1; dirty = true; } break;
+        case IN_ROW1: case IN_ROW2: case IN_ROW3: case IN_ROW4: {   /* fader view: the row's MUTE */
+            int r = idx == IN_ROW1 ? 0 : idx == IN_ROW2 ? 1 : idx == IN_ROW3 ? 2 : 3, f = daw_top + r;
+            if (!dawm_view && f < 8 && f < daw.n) dawm_press(idx, DB_MUTE + f);
+            break;
+        }
+        default: break;
+        }
+        if (idx == IN_SHIFT || idx == IN_ALT) dirty = true;
+    }
+    int d = fire_encoder_take();
+    if (d) { if (dawm_view) daw_jog(d); else scroll_faders(d); }
+    for (int k = 0; k < 4; k++) {
+        int v = fire_knob_take(k);
+        if (!v) continue;
+        if (dawm_view) daw_vpot(dawm_half * 4 + k, v);
+        else if (daw_top + k < daw.n) daw_knob(k, daw_top + k, v);
+    }
+    daw_tick(ms_ticks);                             /* faders left alone let go (touch off) */
+    if (dirty) return;
+}
+
+static void __attribute__((noinline)) paint_dawm(void)   /* the button view: lit = on in the DAW, dim = off */
+{
+    static const uint8_t GRP[4] = {DB_REC, DB_SOLO, DB_MUTE, DB_SELECT};
+    static const uint8_t COL[4][3] = {{7, 0, 0}, {7, 6, 0}, {7, 2, 0}, {6, 6, 6}};   /* REC red, SOLO yellow, MUTE orange, SELECT white */
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 16; c++) {
+            bool on = daw_led(GRP[r] + c / 2) != 0;
+            for (int j = 0; j < 3; j++) led_set(led_pad(r, c, j), on ? COL[r][j] : (COL[r][j] ? 1 : 0));
+        }
+    for (int r = 0; r < 4; r++) { led_set(LED_ROW_G[r], 0); led_set(LED_ROWSIDE_R[r], 0); led_set(LED_ROWSIDE_G[r], 0); }
+}
+static void __attribute__((noinline)) draw_dawm_screen(void)
+{
+    char buf[24], *o;
+    o = cat(buf, "DAW "); o = cat(o, NM_DAWP[daw_proto() ? daw_proto() : G.daw_proto % 3]);
+    if (!dawm_seen) cat(o, " waiting");
+    draw_text(0, 0, buf, 1);
+    for (int row = 0; row < 2; row++) {             /* the 8 strips' names, 4 a line, 5 characters each */
+        o = buf;
+        for (int i = row * 4; i < row * 4 + 4; i++) {
+            int n = 0;
+            for (; n < 5 && i < daw.n && daw.name[i][n]; n++) *o++ = daw.name[i][n];
+            for (; n < 5; n++) *o++ = ' ';
+        }
+        *o = 0;
+        draw_text(0, 14 + 10 * row, buf, 1);
+    }
+    o = buf;                                        /* the DAW's time display, left to right (digit 0 is the rightmost) */
+    for (int i = DAW_DIGITS - 3; i >= 0; i--) { uint8_t ch = daw_st.digit[i] & 0x7F; *o++ = (char)(ch >= 32 && ch < 127 ? ch : ' '); }
+    *o = 0;
+    draw_text(0, 36, buf, 1);
+    draw_text(0, 55, dawm_half ? "knobs 5-8  SH+BRW=out" : "knobs 1-4  SH+BRW=out", 1);
+}
+
+
 static void __attribute__((noinline)) midi_task(uint32_t now)
 {
     if (!tud_midi_mounted()) return;
     uint8_t pkt[4];
     static const uint8_t len[16] = {0, 0, 2, 3, 3, 1, 2, 3, 3, 3, 3, 3, 2, 2, 3, 1};
     while (tud_midi_packet_read(pkt)) {
+        /* v0.36: cable 1 = the DAW port (Mackie Control / HUI). Nothing on it reaches the sequencer: no clock, no
+           host SysEx, no fader_follow (a DAW sends clock and CCs to every port it is told to). */
+        if (pkt[0] >> 4) { daw_in_packet(pkt); continue; }
         uint8_t n = len[pkt[0] & 0xF];
+        if ((pkt[0] & 0xF) == 0xB) fader_follow(pkt[1], pkt[2], pkt[3]);   /* v0.31c: a CC (USB-MIDI packets always carry its status) */
         for (uint8_t i = 0; i < n; i++) midi_in_byte(pkt[1 + i], now);
     }
 }
@@ -2796,55 +3767,117 @@ static void pat_reader(const void *ctx, uint32_t off, uint8_t *dst, uint32_t n) 
 
 /* Erase the area and write the current state: the global record + one sparse record per pattern
    (old full-size records are dropped here). */
+/* v0.31: the clean-up itself is compact.c (compact_run, tested against a real save area by compact_test.c). The
+   UNIVERSAL pages live only in flash, so before the erase they are copied into RAM nothing else needs while stopped:
+   the undo buffers (undo is dropped) + the MIDI batch buffer (empty between passes). UNI_BUDGET keeps them small enough.
+   Edits not saved yet stay as patches (uni_ps) and are saved afterwards as usual. */
+#define UNI_SCRATCH (sizeof undo_buf + sizeof batch)
+_Static_assert(UNI_BUDGET <= UNI_SCRATCH, "the pages must fit the compaction scratch");
+_Static_assert(CP_KIND_PAT == KIND_PAT(0) && CP_KIND_UNI == KIND_UNI(0) && CP_KIND_PAINT == KIND_PAINT(0), "compact.h kinds");
+_Static_assert(CP_PAINTS == PAINT_SLOTS && CP_PAINT_LEN == PAINT_LEN, "compact.h paintings");
+static bool pat_keep_cb(int p)                      /* an empty pattern with default lengths needs no record */
+{
+    if (steps_pattern_size(p)) return true;
+    for (int t = 0; t < TRACKS; t++) if (steps_len[p][t]) return true;
+    return false;
+}
+static uint32_t pat_len_cb(int p) { return steps_record_len(p); }
 static bool compact_all(void)
 {
     if (pat_stuck) return false;                    /* a pattern we couldn't load would be written empty: never */
     saving_kind = -1;
+    batch_flush();                                  /* (the batch buffer is part of the page scratch) */
+    for (int i = 0; i < UNI_SLOTS; i++) if (uni_ps[i].state == US_SAVE) uni_ps[i].state = US_PEND;
     G_snap = G;
-    bool ok = store2_erase() && store2_append(S2_KIND_GLOBAL, &G_snap, sizeof G_snap);
-    for (int p = 0; ok && p < PATTERNS; p++) {
-        uint32_t sz = steps_pattern_size(p);
-        bool blank = sz == 0;                       /* an empty pattern with default lengths needs no record */
-        for (int t = 0; blank && t < TRACKS; t++) if (steps_len[p][t]) blank = false;
-        if (!blank) ok = store2_append_src(KIND_PAT(p), steps_record_len(p), pat_reader, &PAT_ID[p]);
-        if (ok) steps_saved[p] = (uint16_t)sz;
-    }
-    if (ok) { pat_dirty = 0; global_dirty = false; G_saved = G_snap; }
+    const compact_t c = {&G_snap, sizeof G_snap, PATTERNS, pat_keep_cb, pat_len_cb, pat_reader, PAT_ID,
+                         &undo_buf[0][0], sizeof undo_buf, sizeof batch, batch, &paint_saved[0][0], paint_has,
+                         crash_rec.w[0] ? (const void *)&crash_rec : 0};   /* v0.39: a cleared record is not kept */
+    uint32_t kept = 0;
+    int r = compact_run(&c, &kept);
+    if (r == CP_REFUSED) return false;              /* nothing was touched */
+    if (kept) { undo_pat = -1; undo_len[0] = undo_len[1] = 0; undo_open = false; }   /* the undo buffers held the pages */
+    uni_gen++;
+    for (int p = 0; p < UNI_PAGES; p++) uni_touch(p);
+    bool ok = r == CP_OK;
+    if (ok) for (int p = 0; p < PATTERNS; p++) steps_saved[p] = (uint16_t)steps_pattern_size(p);
+    if (ok) { pat_dirty = 0; global_dirty = false; G_saved = G_snap; paint_pend = 0; crash_pend = false; }   /* (paintings + crash from RAM) */
+    if (ok && uni_dirty()) save_soon();             /* v0.31: page edits still waiting are saved after it */
     return ok;
 }
 
 /* Background save: one record at a time, a few flash words per main-loop pass (see saver_poll). */
 
-static void saver_start(void) { save_run = true; save_due = 0; save_forced_run = save_force; save_force = false; dirty = true; }
+static void saver_start(void) { save_run = true; save_due = 0; save_forced_run = save_force; save_force = false; save_paint_only = false; dirty = true; }
 
+/* v0.31: the stored page + its edits, through the cursor set up when the save began: O(1) per flash word (review
+   2026-10-27: re-walking the page per word took 7-10 us a word = 1-2 ms per quiet pass) */
+static void uni_save_reader(const void *ctx, uint32_t off, uint8_t *dst, uint32_t n) { (void)ctx; uni_cur_read(&uni_wcur, off, dst, n); }
 static void saver_poll(bool quiet_moment)
 {
+    if (uw.state) return;                           /* v0.31: a host page write owns the writer (uni_poll steps it) */
     if (store2_busy()) {
         if (quiet_moment) store2_step(8);           /* ~8 x 16 us of flash stall per pass */
         if (!store2_busy() && store2_last_failed()) {   /* write failed: mark it unsaved again, retry later */
-            if (saving_kind == S2_KIND_GLOBAL) global_dirty = true; else if (saving_kind >= KIND_PAT(0)) pat_dirty |= (uint32_t)(1u << (saving_kind - KIND_PAT(0)));
+            if (saving_kind == S2_KIND_GLOBAL) global_dirty = true;
+            else if (IS_KIND_PAT(saving_kind)) pat_dirty |= (uint32_t)(1u << (saving_kind - KIND_PAT(0)));
+            else if (IS_KIND_UNI(saving_kind)) uni_slots_state(saving_kind - KIND_UNI(0), US_SAVE, US_PEND);
+            else if (IS_KIND_PAINT(saving_kind)) paint_pend |= (uint8_t)(1u << (saving_kind - KIND_PAINT(0)));
+            else if (saving_kind == KIND_CRASH) crash_pend = true;   /* v0.39 */
             save_run = false; save_due = ms_ticks + 10000; if (!save_due) save_due = 1;
             if (save_forced_run) save_force = true;     /* a SAVE NOW that failed retries even with AUTOSAVE off */
         } else if (!store2_busy() && saving_kind == S2_KIND_GLOBAL) { G_saved = G_snap; saves_global = (saves_global + 1) & 127; }   /* what was written */
-        else if (!store2_busy() && saving_kind >= KIND_PAT(0)) steps_saved[saving_kind - KIND_PAT(0)] = (uint16_t)saving_size;
+        else if (!store2_busy() && IS_KIND_PAT(saving_kind)) steps_saved[saving_kind - KIND_PAT(0)] = (uint16_t)saving_size;
+        else if (!store2_busy() && IS_KIND_UNI(saving_kind)) { uni_slots_state(saving_kind - KIND_UNI(0), US_SAVE, US_FREE); uni_gen++; dirty = true; }   /* now in flash */
         if (!store2_busy()) saving_kind = -1;
         return;
     }
     if (!save_run) return;
     if (global_dirty && !memcmp(&G, &G_saved, sizeof G)) global_dirty = false;   /* e.g. pattern 1 -> 2 -> 1: nothing new */
     int kind = -1, p = -1;
-    if (global_dirty) kind = S2_KIND_GLOBAL;
+    if (save_paint_only) p = PATTERNS;              /* v0.38b: paintings only: skip settings, patterns, pages */
+    else if (global_dirty) kind = S2_KIND_GLOBAL;
     else for (p = 0; p < PATTERNS; p++) if ((pat_dirty & ~pat_stuck) >> p & 1) { kind = KIND_PAT(p); break; }
+    uint32_t ulen = 0;
+    int udrop = -1;
+    if (kind < 0 && !save_paint_only)               /* v0.31: a UNIVERSAL page with edits, if it fits the budget with the others as STORED */
+        for (p = 0; p < UNI_PAGES && kind < 0; p++) {
+            if (!uni_has_slots(p, 1u << US_PEND)) continue;
+            uint32_t bl, others = 0;
+            const uint8_t *b = uni_base(p, &bl);
+            ulen = uni_patched_len(b, bl, uni_ps, UNI_SLOTS, p, (1u << US_PEND) | (1u << US_SAVE));   /* (one pass, once per save) */
+            for (int q = 0; q < UNI_PAGES; q++) if (q != p) { uint32_t ql; if (uni_base(q, &ql)) others += ql; }
+            if (others + ulen <= UNI_BUDGET) { kind = KIND_UNI(p); break; }
+            if (udrop < 0) udrop = p;
+        }
+    if (kind < 0 && udrop >= 0) {                   /* no page's edits can ever fit (pages grew meanwhile): dropped, never stuck (USER_GUIDE) */
+        uni_drop_edits(udrop, "edits dropped");
+        return;                                     /* (the run goes on next pass) */
+    }
+    if (kind < 0)                                   /* v0.37 a painting saved by hand (from its RAM copy) */
+        for (p = 0; p < PAINT_SLOTS; p++) if (paint_pend >> p & 1) { kind = KIND_PAINT(p); break; }
+    if (kind < 0 && crash_pend) kind = KIND_CRASH;  /* v0.39 the last crash (from crash_rec) */
     if (kind < 0) { save_run = false; save_waiting_compact = false; dirty = true; return; }
     if (kind == S2_KIND_GLOBAL) G_snap = G;
-    else saving_size = steps_pattern_size(p);
+    else if (IS_KIND_PAT(kind)) saving_size = steps_pattern_size(p);
+    else if (IS_KIND_UNI(kind)) {                                          /* these edits go into this record (an edit to one of them cancels it) */
+        uint32_t bl;
+        const uint8_t *b = uni_base(p, &bl);       /* (the page being written is not the newest until its commit word) */
+        uni_slots_state(p, US_PEND, US_SAVE);
+        uni_cur_init(&uni_wcur, b, bl, uni_ps, UNI_SLOTS, p, 1u << US_SAVE);
+    }
     bool begun = kind == S2_KIND_GLOBAL ? store2_begin(kind, &G_snap, sizeof G_snap)   /* from a snapshot */
+               : IS_KIND_UNI(kind) ? store2_begin_src(kind, ulen, uni_save_reader, &UNI_ID[p])
+               : IS_KIND_PAINT(kind) ? store2_begin(kind, paint_saved[p], PAINT_LEN)   /* (a new save of it cancels it first) */
+               : kind == KIND_CRASH ? store2_begin(kind, &crash_rec, sizeof crash_rec)   /* (a clear cancels it first) */
                                         : store2_begin_src(kind, steps_record_len(p), pat_reader, &PAT_ID[p]);   /* live: edits cancel it */
     if (begun) {
-        if (kind == S2_KIND_GLOBAL) global_dirty = false; else pat_dirty &= (uint32_t)~(1u << p);
+        if (kind == S2_KIND_GLOBAL) global_dirty = false; else if (IS_KIND_PAT(kind)) pat_dirty &= (uint32_t)~(1u << p);
+        else if (IS_KIND_PAINT(kind)) paint_pend &= (uint8_t)~(1u << p);
+        else if (kind == KIND_CRASH) crash_pend = false;
         saving_kind = kind;
         return;
     }
+    if (IS_KIND_UNI(kind)) uni_slots_state(p, US_SAVE, US_PEND);   /* (not begun: they wait) */
     /* no room: erase + rewrite everything, but only while stopped (it stalls ~1-2 s) */
     if (!playing && !ext_playing) { if (!compact_all()) memcpy(status_line, "full", 5); save_run = false; save_waiting_compact = false; }
     else save_waiting_compact = true;
@@ -2864,7 +3897,6 @@ static void set_defaults(void)
     steps_clear_all();
     G.bpm = 120; G.swing = 50;
     faders_default();
-    lights_defaults();
     for (int s = 0; s < 16; s += 4) steps_set(0, 0, s, LV_NORMAL, 0);
     steps_set(0, 1, 4, LV_NORMAL, 0); steps_set(0, 1, 12, LV_NORMAL, 0);
     for (int s = 2; s < 16; s += 4) steps_set(0, 2, s, LV_NORMAL, 0);
@@ -2884,6 +3916,11 @@ static void load_state(void)
     if (store2_has_any()) {
         store2_read(S2_KIND_GLOBAL, &G, sizeof G);
         G_saved = G;                                /* as stored: if a clamp below changes G, the next save writes it */
+        for (int ps = 0; ps < PAINT_SLOTS; ps++) {  /* v0.37 the saved paintings (a record of another length is not one) */
+            uint32_t len = 0;
+            const uint8_t *r = store2_ptr(KIND_PAINT(ps), &len);
+            if (r && len == PAINT_LEN) { memcpy(paint_saved[ps], r, PAINT_LEN); paint_has |= (uint8_t)(1u << ps); }
+        }
         bool converted = false;
         for (int p = 0; p < PATTERNS; p++) {
             uint32_t len = 0;
@@ -2915,12 +3952,7 @@ static void load_state(void)
         for (int i = 0; i < 4; i++) G.cc_trk[i] &= (uint8_t)(i == 2 ? 0x00 : 0xFF);  /* v0.29: tracks 16-23 (melodic) are never CC tracks */
         for (int g = 0; g < 4; g++) G.grid_layout[g] = 0;   /* v0.29b: no group maps any more (MPC pads -> the remote, 16 levels -> the row button) */
         if (!G.fad_init) faders_default();          /* a save from before v0.13 */
-        if (!G.lt_init) lights_defaults();          /* a save from before the lights */
-        if (!G.lt_idle_v18) {                       /* v0.18, once: the lights never start by themselves (the owner: not wanted) */
-            G.lt_idle = 0; G.lt_idle_v18 = 1;
-            global_dirty = true; save_due = ms_ticks + 3000; if (!save_due) save_due = 1; save_force = true;   /* keep it, AUTOSAVE or not */
-        }
-        G.lt_mode = (uint8_t)ctl_show_sanitize(G.lt_mode); G.lt_bars %= 5; lights_set_bar_style(G.lt_bars); G.lt_flip = 0; lights_set_heat_flip(0); G.lt_idle %= 6; G.lt_speed &= 127; G.lt_smooth &= 1; G.autosave_off &= 1;
+        G.autosave_off &= 1;
         if (G.fad_n > MAXFADERS) G.fad_n = MAXFADERS;
         for (int i = 0; i < MAXFADERS; i++) {
             if (G.fad_ch[i] < 1 || G.fad_ch[i] > 16) G.fad_ch[i] = 1;
@@ -2985,19 +4017,40 @@ int main(void)
     tusb_init(0, &dev_init);
     oled_init();
     fire_hw_init();
+    hm_init(fb, led_level, led_fine, LED_FRAMES);   /* v0.33 ORC mode's decoders (nothing shows until it is on) */
     load_state();
+    daw_init(G.daw_proto % 3);                      /* v0.36b: listens on the DAW port from boot (DAW mode or not) */
     if (!G.pad_hold_v28) { G.pad_hold = PAD_HOLD_DEFAULT; G.pad_hold_v28 = 1; }   /* v0.28: a save from before the hold-off (or none) gets 20 ms */
     G.pad_hold %= 6;
+    G.uni_page %= UNI_PAGES; G.uni_bank &= 3;       /* v0.31 */
+    uni_latch_init(uni_lat);
+    for (int p = 0; p < UNI_PAGES; p++) uni_values_reset(p);   /* knobs at their start values, toggles off */
     kc_init_copies();                               /* v0.29: the per-section knob banks start as the STEP ones */
     memset(kb_val, 64, sizeof kb_val);
     crash_load(&crash_boot);
     if (crash_boot.valid) cat(status_line, crash_boot.cause == CRASH_WDOG ? "WDOG RST" : "FAULT RST");   /* the header's status slot */
+    {   /* v0.39: the crash record in flash (see crash_rec) */
+        uint32_t len = 0;
+        const uint8_t *r = store2_ptr(KIND_CRASH, &len);
+        crash_rec_t f;
+        bool have = r && len == sizeof f;
+        if (have) memcpy(&f, r, sizeof f);
+        have = have && f.magic == CRASH_REC_MAGIC;
+        if (have) crash_rec = f;
+        if (crash_boot.valid) {                     /* a crash in the registers: flash gets it unless it holds it already */
+            crash_rec_t now = {CRASH_REC_MAGIC, {0}};
+            memcpy(now.w, &crash_boot.valid, sizeof now.w);
+            if (!have || memcmp(&f, &now, sizeof now)) { crash_rec = now; crash_pend = true; saver_start(); save_paint_only = true; }
+        } else if (have && f.w[0] == 1) memcpy(&crash_boot.valid, f.w, sizeof f.w);   /* the registers lost it: flash's copy */
+    }
 
     uint32_t next_beat = 0;
     uint32_t next_knobs = 0, next_draw = 0, dfu_at = 0, next_anim = 0;
     for (;;) {
         IWDG->KR = 0xAAAA;
         uint32_t now = us_now();
+        if (loop_last_us) { uint32_t dl = now - loop_last_us; if (dl > loop_max_us) loop_max_us = dl; }   /* v0.31: the longest pass (07) */
+        loop_last_us = now;
         if ((int32_t)(ms_ticks - next_beat) >= 0) { next_beat = ms_ticks + 1000; RTC->BKP12R = ms_ticks; }   /* uptime, for a watchdog record */
         crash_stage(ST_USB);
         tud_task();
@@ -3039,35 +4092,20 @@ int main(void)
         batch_flush();
 
         crash_stage(ST_EVENTS);
-        handle_events(now);
+        if (hostm) hostm_events(); else if (dawm) dawm_events(); else if (paintm) paintm_events(); else handle_events(now);   /* v0.33 ORC mode / v0.36 DAW mode own every press */
 
         crash_stage(ST_GATES);
-        /* lights: the idle ones end when playing starts; with the sequencer stopped and untouched for the idle time, start */
-        {
-            bool run = playing || ext_playing;
-            if (run) lt_input_ms = ms_ticks;        /* the idle time counts from when playing STOPS, not from the last touch */
-            if (lt_on && !lt_manual && run) lights_off();
-            else if (!lt_on) {
-                bool live_held = false;
-                for (int i = 0; i < 64 && !live_held; i++) live_held = live[i].on;
-                ctl_idle_t in = {
-                    .idle_s = LT_IDLE_S[G.lt_idle % 6], .lt_on = lt_on, .menu_on = menu_on,
-                    .playing = playing, .ext_playing = ext_playing,
-                    .held = held_t >= 0 || held_row >= 0 || held_pad >= 0 || pat_btn >= 0 || live_held,
-                    .editing = song_edit || trkvol || picker_on() || rec_arm || surface_on,
-                    .modifier = fire_held(IN_SHIFT) || fire_held(IN_ALT),
-                    .now_ms = ms_ticks, .last_input_ms = lt_input_ms,
-                };
-                if (ctl_idle_should_start(&in)) lights_on(false, false);
-            }
-        }
+        /* (v0.31r: the idle light start that lived here is gone with the shows; nothing lights the pads by itself) */
 
         if (ctl_lazy_due(save_lazy_due, ms_ticks) && !playing && !ext_playing) {   /* settings changed while stopped */
             save_lazy_due = 0;
             if ((global_dirty || (pat_dirty & ~pat_stuck)) && !save_due && !save_run) save_due = ms_ticks ? ms_ticks : 1;
         }
-        if (save_due && (int32_t)(ms_ticks - save_due) >= 0 && G.autosave_off && !save_force)
+        if (save_due && (int32_t)(ms_ticks - save_due) >= 0 && G.autosave_off && !save_force) {
             save_due = 0;                           /* AUTOSAVE off: the change stays marked (*) until SAVE NOW */
+            if ((paint_pend || crash_pend) && !save_run) { saver_start(); save_paint_only = true; }   /* v0.38b / v0.39: a failed painting
+                                                       or crash record retries alone */
+        }
         if ((save_due && (int32_t)(ms_ticks - save_due) >= 0) || (save_waiting_compact && !playing && !ext_playing && !save_run))
             saver_start();
         {
@@ -3083,21 +4121,19 @@ int main(void)
             }
             crash_stage(ST_SAVER);
             saver_poll(quiet);
-            crash_stage(ST_LIGHTS);
-            bool lq = quiet;                        /* lights also keep clear of a ratchet or a note-off that is about to be due */
-            for (int i = 0; lq && i < NOFFS; i++) if (offs[i].live && (int32_t)(offs[i].at_us - now) < 1000) lq = false;
-            for (int i = 0; lq && i < NRATQ; i++) if (ratq[i].live && (int32_t)(ratq[i].at_us - now) < 1000) lq = false;
-            lights_task(now, lq);
+            uni_poll(quiet);                        /* v0.31: a host page write, streamed into flash */
         }
         crash_stage(ST_KNOBS);
         if ((int32_t)(ms_ticks - next_knobs) >= 0) { next_knobs = ms_ticks + 5; fire_knobs_poll(); }
 
         if ((int32_t)(ms_ticks - next_anim) >= 0) { next_anim = ms_ticks + (mode == MODE_DRUM ? 40 : 150); dirty = true; }   /* pulses + blinks */
+        status_brief_tick();                        /* v0.37d: "DAW off" / "paint off" go after 2 s */
         crash_stage(ST_PAINT);
-        if (dirty) paint();
+        if (dirty && !hostm) paint();               /* v0.33: in ORC mode the ORC paints */
         crash_stage(ST_RENDER);
         oled_busy();
-        if (dirty && (int32_t)(ms_ticks - next_draw) >= 0) {
+        if (hostm) { if (hostm_flush && oled_flush()) hostm_flush = false; }   /* the ORC's bitmap, as it arrived */
+        else if (dirty && (int32_t)(ms_ticks - next_draw) >= 0) {
             render();
             if (oled_flush()) { dirty = false; next_draw = ms_ticks + 33; }
         }

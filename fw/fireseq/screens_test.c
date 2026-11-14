@@ -7,7 +7,7 @@
 #include "screens.h"
 
 static int fails, checks;
-#define EXPECTED 16                              /* the number of checks a full run makes: a drift fails the run */
+#define EXPECTED 23                              /* the number of checks a full run makes: a drift fails the run */
 #define CHECK(c, msg) do { checks++; if (!(c)) { printf("FAIL: %s\n", msg); fails++; } } while (0)
 
 static void save(int n)
@@ -119,6 +119,47 @@ int main(void)
     draw_clear(); scr_levels(NAME, (uint8_t[4]){127, 127, 127, 127}, (uint8_t[4]){0, 1, 0, 0});
     CHECK(lit(88, 32, 94, 39) > 0 && lit(88, 22, 94, 29) == 0 && lit(0, 0, 127, 19) == 0,
           "a muted track shows M on its own row, and the header area stays untouched");
+
+    /* v0.31 UNIVERSAL: knob rows (label, bar, value; the last-turned row marked), and 4 text lines cut at 19 characters */
+    {
+        const char *lab[4] = {"1A CC74 ch1", "1B PB ch16", "1C --", "1D CC127 ch16"};
+        int val[4] = {127, 64, 0, 0}, used[4] = {1, 1, 0, 1};
+        draw_clear(); scr_uni_knobs(lab, val, used, 1); save(15);
+        CHECK(lit(0, 0, 127, 19) == 0 && lit(0, 32, 1, 38) == 14 && lit(0, 22, 1, 28) == 0 && lit(84, 42, 127, 49) == 0,
+              "UNIVERSAL knob rows: below the header, the mark only on its row, no bar / value for an unassigned knob");
+        CHECK(lit(85, 23, 104, 28) > lit(85, 33, 104, 38) && lit(85, 33, 104, 38) > 0 && lit(106, 22, 109, 29) == 0,
+              "a fuller value lights more bar; a gap between the bar and a 3-digit value");
+        const char *ln[4] = {"1 type note latch", "2 ch 16", "a line that is far too long to fit", 0};
+        draw_clear(); scr_lines(ln); save(16);
+        CHECK(lit(0, 0, 127, 21) == 0 && lit(114, 42, 127, 49) == 0 && lit(0, 42, 113, 49) > 0 && lit(0, 52, 127, 63) == 0,
+              "text lines: in the body, cut at 19 characters, a missing line draws nothing");
+    }
+
+    /* v0.31d: the DAW page = the fader rows with the host's names (8 characters at most, left of the bar at x 60) */
+    {
+        scr_fader_t df[4] = {{1, 6, 0, 100}, {1, 7, 0, 0}, {1, 8, 0, 64}, {1, 9, 0, 127}};
+        const char *dn[4] = {"WWWWWWWWWWWW", "", "Bass", "MASTER"};   /* a 12-character name (only 8 may show), an empty one */
+        draw_clear();
+        scr_head_t hd = {"PAT 3", 120, 50, 1, true, false, "DAW", "F6-9/9"};
+        scr_header(&hd); scr_fader_rows(df, dn);
+        save(17);
+        CHECK(lit(0, 22, 47, 29) > 0 && lit(48, 20, 59, 63) == 0, "DAW names: at most 8 characters (48 px), nothing between them and the bar");
+        uint8_t got[sizeof fb];
+        memcpy(got, fb, sizeof fb);
+        draw_clear(); draw_text(0, 32, "row 7", 1);
+        int same7 = 1;
+        for (int y = 32; y < 40; y++) for (int x = 0; x < 59; x++)
+            if ((got[(y >> 3) * FB_W + x] >> (y & 7) & 1) != (fb[(y >> 3) * FB_W + x] >> (y & 7) & 1)) same7 = 0;
+        memcpy(fb, got, sizeof fb);
+        CHECK(lit(60, 22, 108, 29) > lit(60, 42, 108, 49) && lit(61, 33, 106, 38) == 0 && lit(0, 32, 30, 39) > 0 && same7,
+              "DAW rows: the bar follows the level (row 2 at 0 is empty); an empty name shows 'row 7'");
+        CHECK(lit(110, 52, 127, 59) > 0 && lit(110, 22, 127, 29) > 0 && lit(0, 0, 127, 19) > 0, "DAW rows: the value at the right (100, 127), the header drawn");
+        scr_fader_t ff[4] = {{1, 1, 7, 100}, {1, 2, 74, 64}, {1, 3, 1, 12}, {1, 4, 11, 127}};
+        uint8_t a[sizeof fb], b2[sizeof fb];
+        draw_clear(); scr_faders(ff); memcpy(a, fb, sizeof fb);
+        draw_clear(); scr_fader_rows(ff, 0); memcpy(b2, fb, sizeof fb);
+        CHECK(!memcmp(a, b2, sizeof fb), "FADERS draws exactly as before (scr_faders = the rows with no names)");
+    }
 
     /* a header never writes below its rule, a status too long for the room is cut */
     draw_clear();

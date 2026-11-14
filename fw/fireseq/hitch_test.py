@@ -4,7 +4,7 @@ steps. Any gap that misses its nearest whole step by > 3 ms is a hiccup.
 Usage (on the Pi, while the Fire plays): python3 hitch_test.py [seconds]  (keep swing at 50 %)"""
 import mido, sys, time, statistics
 secs = float(sys.argv[1]) if len(sys.argv) > 1 else 90
-name = next(n for n in mido.get_input_names() if 'ORC FW seq' in n)
+name = next(n for n in mido.get_input_names() if ('FLAME seq' in n or 'ORC FW seq' in n))
 i = mido.open_input(name)
 t, last = [], None
 spreads, cur0 = [], None

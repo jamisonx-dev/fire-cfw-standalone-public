@@ -1,5 +1,9 @@
 """Live checks of the 2026-10-13 review fixes ON THE REAL FIRE (run on the Pi, Fire idle, nobody touching it).
 
+!! v0.31r (2026-11-11) removed the light shows, host 03 / 04 / 05 and idle start. The phases `text`, `idle`, `clock` and
+!! the SPARKLE half of `host` test those and only fit firmware up to v0.31h; on v0.31r+ run only `lazy` (and treat a
+!! `host` failure about SPARKLE as expected: a hand-started PI VU now WAITS, dark, instead). Not rewritten yet.
+
 Uses host command 07 (status) to SEE what the pads and the saver are doing, so every check is measured, not assumed.
 Expects the saved Show = PI VU (14), idle start = 1 min (the owner's settings). Restores the light speed it changes.
 
@@ -17,12 +21,12 @@ Stops / starts orc1-firevu (sudo) for the host phases and leaves it running.
 import mido, subprocess, sys, threading, time, statistics
 
 HDR = [0x7D, 0x4F, 0x52, 0x43]
-FIELDS = ["lt_on", "cur", "host", "by_host", "pinned", "unsaved", "lazy", "saves", "playing", "ext", "mode", "speed", "menu", "frame", "stack_hi", "stack_lo", "surface", "surf_ch"]
+FIELDS = ["lt_on", "cur", "host", "by_host", "pinned", "unsaved", "lazy", "saves", "playing", "ext", "mode", "speed", "menu", "frame", "stack_hi", "stack_lo", "surface", "surf_ch", "loop_hi", "loop_lo"]
 fails = 0
 
 
 def find(names):
-    return next(n for n in names if "ORC FW" in n)
+    return next(n for n in names if ("FLAME seq" in n or "ORC FW seq" in n))
 
 
 out = mido.open_output(find(mido.get_output_names()))

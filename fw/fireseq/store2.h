@@ -44,6 +44,11 @@ bool store2_step(uint32_t max_words);               /* true while more remains *
 bool store2_busy(void);
 int store2_busy_kind(void);                         /* kind being written, -1 none */
 void store2_cancel(void);
+/* v0.31 (a page streamed in from the host as it arrives): words of the record written so far (header 8, payload,
+ * CRC, commit), the total, and the payload in flash (to check it before the commit word is written). */
+uint32_t store2_words_done(void);
+uint32_t store2_words_total(void);
+const uint8_t *store2_busy_payload(void);
 bool store2_last_failed(void);
 bool store2_append_src(int kind, uint32_t len, s2_reader rd, const void *ctx);   /* blocking */
 bool store2_erase(void);                            /* erase the area (then append the current state) */

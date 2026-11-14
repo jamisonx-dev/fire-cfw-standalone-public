@@ -76,14 +76,17 @@ static void bar(int x0, int x1, int y, int num, int den)
     if (w > 0) draw_fill(x0 + 1, y + 1, x0 + w, y + 6, 1);
 }
 
-void scr_faders(const scr_fader_t f[4])
+void scr_faders(const scr_fader_t f[4]) { scr_fader_rows(f, 0); }
+
+void scr_fader_rows(const scr_fader_t f[4], const char *const name[4])
 {
     char b[24], *o;
     for (int r = 0; r < 4; r++) {
         int y = row_y(r);
         if (f[r].used == 1) {
-            o = put_str(b, "F"); o = put_int(o, f[r].num); o = put_str(o, " CC"); put_int(o, f[r].cc);
-            draw_text(0, y, b, 1);
+            if (name && name[r] && *name[r]) draw_text_n(0, y, name[r], SCR_FADER_NAME, 1);   /* v0.31d the DAW page: the host's name */
+            else if (name) { o = put_str(b, "row "); put_int(o, f[r].num); draw_text(0, y, b, 1); }
+            else { o = put_str(b, "F"); o = put_int(o, f[r].num); o = put_str(o, " CC"); put_int(o, f[r].cc); draw_text(0, y, b, 1); }
             bar(60, 108, y, f[r].val, 127);
             put_int(b, f[r].val);
             draw_text(128 - (int)strlen(b) * 6, y, b, 1);
@@ -91,6 +94,25 @@ void scr_faders(const scr_fader_t f[4])
             draw_text(0, y, "+ row button: add", 1);
         }
     }
+}
+
+void scr_uni_knobs(const char *const label[4], const int val[4], const int used[4], int mark)
+{
+    char b[8];
+    for (int r = 0; r < 4; r++) {
+        int y = row_y(r);
+        if (r == mark) draw_fill(0, y, 1, y + 6, 1);
+        draw_text_n(4, y, label[r], 13, 1);
+        if (!used[r]) continue;
+        bar(84, 105, y, val[r], 127);              /* (ends 4 px before a 3-digit value) */
+        put_int(b, val[r]);
+        draw_text(128 - (int)strlen(b) * 6, y, b, 1);
+    }
+}
+
+void scr_lines(const char *const line[4])
+{
+    for (int r = 0; r < 4; r++) if (line[r]) draw_text_n(0, row_y(r), line[r], 19, 1);
 }
 
 void scr_levels(const char *const name[4], const uint8_t val[4], const uint8_t muted[4])

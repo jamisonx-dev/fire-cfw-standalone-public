@@ -29,8 +29,8 @@ def unpack(b):
 
 class Fire:
     def __init__(self):
-        self.out = mido.open_output(next(n for n in mido.get_output_names() if "ORC FW" in n))
-        self.inp = mido.open_input(next(n for n in mido.get_input_names() if "ORC FW" in n))
+        self.out = mido.open_output(next(n for n in mido.get_output_names() if ("FLAME seq" in n or "ORC FW seq" in n)))
+        self.inp = mido.open_input(next(n for n in mido.get_input_names() if ("FLAME seq" in n or "ORC FW seq" in n)))
         time.sleep(0.2)
         list(self.inp.iter_pending())
 

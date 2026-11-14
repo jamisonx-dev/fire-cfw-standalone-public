@@ -34,8 +34,8 @@ MUTS = [
      "        if self.out is None:\n            return False\n        return self._send(data)",
      "        self.service(now)\n        if self.out is None:\n            return False\n        return self._send(data)"),
     ("port listing unguarded",
-     "        try:\n            outs = [n for n in self.mido.get_output_names() if \"ORC FW\" in n]\n        except Exception as e:",
-     "        if True:\n            outs = [n for n in self.mido.get_output_names() if \"ORC FW\" in n]\n        if False:"),
+     "        try:\n            outs = [n for n in self.mido.get_output_names() if (\"FLAME seq\" in n or \"ORC FW seq\" in n)]\n        except Exception as e:",
+     "        if True:\n            outs = [n for n in self.mido.get_output_names() if (\"FLAME seq\" in n or \"ORC FW seq\" in n)]\n        if False:"),
     ("warnings flood (logged every time)", "    if key not in _warned:", "    if True:"),
     ("an outage is logged once per process, not per outage",
      '_warned.difference_update([k for k in _warned if k[0] == "fire"])', "pass"),
@@ -68,7 +68,7 @@ MUTS = [
     ("an unknown exception's IRQ number is off by one", '(f" (IRQ {n - 16})"', '(f" (IRQ {n - 15})"'),
     ("the running context is not described", "running: {running_in(c['psr'])}", "running: ?"),
     ("a new crash's full report is never saved", "                            if self.on_crash:", "                            if False:"),
-    ("a v2 reply's build id is dropped", "nf = 10 if d[5] >= 2 else 7", "nf = 7"),
+    ("a v2 reply's build id is dropped", "nf = {1: 7, 2: 10, 3: 16}[d[5]]", "nf = {1: 7, 2: 7, 3: 16}[d[5]]"),
 ]
 bad = 0
 for name, old, new in MUTS:

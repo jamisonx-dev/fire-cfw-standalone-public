@@ -142,7 +142,13 @@ function Enter-UpdateMode {
     else {
         $names = [FireMidi]::Names()
         $id = -1
-        for ($i = 0; $i -lt $names.Length; $i++) { if ($names[$i] -match 'FL STUDIO FIRE|ORC FW') { $id = $i; break } }
+        # Akai's firmware ("FL STUDIO FIRE"), ours up to v0.35b ("ORC FW seq"), ours since the FLAME rename (v0.36+).
+        # FLAME has two ports. Windows 10 names them after the device, "FLAME" (the sequencer, the one that takes the
+        # update-mode message) and "MIDIOUT2 (FLAME)" (the DAW port); newer Windows MIDI may use the port names
+        # "FLAME seq" / "FLAME DAW". So FLAME matches the WHOLE name only ("2- " = Windows' prefix for a second
+        # Fire): never the DAW port, never other makers' gear with FLAME in the name (Flame Instruments).
+        $pat = 'FL STUDIO FIRE|ORC FW|^(\d+- )?FLAME( seq)?$'
+        for ($i = 0; $i -lt $names.Length; $i++) { if ($names[$i] -match $pat) { $id = $i; break } }
         if ($id -ge 0) {
             Say "Found the Fire ('$($names[$id])'). Asking it to switch to update mode (the screen goes dark)..."
             $sx = [byte[]](0xF0, 0x47, 0x7F, 0x43, 0x72, 0x00, 0x00, 0xF7)

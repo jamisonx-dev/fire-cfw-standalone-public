@@ -240,12 +240,22 @@ def bars(levels):
 # ---------------------------------------------------------------- the Fire's crash record (crash.h in the firmware)
 CRASH_CAUSES = {0: "none", 1: "HardFault", 2: "MemManage", 3: "BusFault", 4: "UsageFault", 5: "watchdog (a hang)",
                 6: "stack smash (a buffer overran into a stack canary; PC = the function whose buffer it was)",
-                7: "watchpoint (a CPU write hit TIM4's watched canary; PC = just after the writing instruction)"}
+                7: "watchpoint (a CPU write hit TIM4's watched canary; PC = just after the writing instruction)",
+                8: "TIM4 stack slip (diagnostic v0.29d: TIM4's stack check failed BEFORE it returned; PC/LR/xPSR = the code it interrupted)"}
+SLIP_KINDS = {1: "the interrupted code's frame is not where TIM4's stack starts", 2: "TIM4's SP moved (seen after the LEDs)",
+              3: "TIM4's SP moved (seen after the SPI chain)", 4: "TIM4's SP moved (seen after the buttons)",
+              5: "TIM4's saved return address changed"}
 CRASH_STAGES = {1: "USB + MIDI + host protocol", 2: "sequencer", 3: "note-off / ratchet queues", 4: "input events",
                 5: "idle lights + save gates", 6: "flash saver", 7: "lights", 8: "knobs", 9: "paint LEDs",
                 10: "render + OLED", 11: "loop tail", 12: "start-up"}
-CRASH_REPLY_LEN = 61                                # version 2 (+ build id, SP, stack low point); version 1 was 46 bytes
-CRASH_REPLY_LENS = {1: 46, 2: 61}
+CRASH_REPLY_LEN = 91                                # version 3 (+ the TIM4 check note); 2 = 61 (+ build id, SP, stack low); 1 = 46
+CRASH_REPLY_LENS = {1: 46, 2: 61, 3: 91}
+# v0.31g: TIM4's return-slot check verdicts (crash.h crash_t4_verdict). Only CHANGED resets the Fire (cause 8 kind 5).
+T4_VERDICTS = {0: "ok", 1: "MISREAD (memory agreed on a second look: one of the check's reads returned a wrong value; not a crash)",
+               2: "STALE yardstick (the slot was right, the RAM copy t4_exc was not: its store was lost / overwritten; not a crash)",
+               3: "CHANGED (the slot itself held a wrong return: crash cause 8 kind 5)",
+               4: "ENTRY MISREAD (v0.33b: TIM4 was handed an entry address that cannot be one; 'slot' below = what it was handed, "
+                  "'yardstick' = its own stack pointer; the 2026-11-11 crashes; counted, not a crash)"}
 
 
 def unpack32(b):
@@ -261,13 +271,14 @@ def decode_crash(data):
     d = list(data)
     if len(d) < 6 or d[:5] != HDR + [0x06] or CRASH_REPLY_LENS.get(d[5]) != len(d):
         return None
-    nf = 10 if d[5] >= 2 else 7
+    nf = {1: 7, 2: 10, 3: 16}[d[5]]
     f = [unpack32(d[11 + 5 * i:16 + 5 * i]) for i in range(nf)]
-    return dict(valid=bool(d[6]), cause=d[7], cause_name=CRASH_CAUSES.get(d[7], "?"), stage=d[8],
+    t4 = dict(zip(("t4_count", "t4_ms", "t4_kind", "t4_seen", "t4_want", "t4_exc"), f[10:16])) if nf == 16 else {}
+    return dict(t4, valid=bool(d[6]), cause=d[7], cause_name=CRASH_CAUSES.get(d[7], f"cause {d[7]} (UNKNOWN to this decoder: host_vu.py is older than the firmware)"), stage=d[8],
                 stage_name=CRASH_STAGES.get(d[8], "?"), count=d[9], total=d[10],
                 pc=f[0], lr=f[1], psr=f[2], cfsr=f[3], hfsr=f[4], addr=f[5], up_ms=f[6],
-                build=f[7] if nf == 10 else None,   # None = an older firmware's reply; 0 = recorded by an image without an id
-                sp=f[8] if nf == 10 else None, stack_min=f[9] if nf == 10 else None)
+                build=f[7] if nf >= 10 else None,   # None = an older firmware's reply; 0 = recorded by an image without an id
+                sp=f[8] if nf >= 10 else None, stack_min=f[9] if nf >= 10 else None)
 
 
 STACK_WORDS = 64
@@ -299,10 +310,29 @@ def running_in(psr):
     return EXCEPTIONS.get(n, f"exception {n}" + (f" (IRQ {n - 16})" if n >= 16 else ""))
 
 
+def describe_t4_note(c):
+    """The TIM4 check note (06 v3), or None when there is none / an older firmware."""
+    if not c.get("t4_count"):
+        return None
+    return (f"TIM4 return-slot check: {c['t4_count']} mismatch(es) noted; the last at {c['t4_ms'] / 1000:.1f} s up: "
+            f"{T4_VERDICTS.get(c['t4_kind'], 'kind ' + str(c['t4_kind']))}; the check read slot 0x{c['t4_seen']:08x}, "
+            f"yardstick 0x{c['t4_want']:08x}; TIM4 was handed 0x{c['t4_exc']:08x}")
+
+
 def describe_crash(c):
     """One readable line (what to look at: arm-none-eabi-addr2line -e fireseq.elf <pc>)."""
     if not c["valid"]:
         return "no crash on record"
+    if c["cause"] not in CRASH_CAUSES:              # don't dress a newer record up as a fault (11-09: CFSR = a slip kind)
+        return (f"{c['cause_name']} in stage '{c['stage_name']}' after {c['up_ms'] / 1000:.1f} s up; raw fields PC 0x{c['pc']:08x} "
+                f"LR 0x{c['lr']:08x} xPSR 0x{c['psr']:08x} CFSR 0x{c['cfsr']:08x} HFSR 0x{c['hfsr']:08x} addr 0x{c['addr']:08x} "
+                f"(their meaning depends on the cause) [early crashes in a row {c['count']}, total {c['total']}]")
+    if c["cause"] == 8:                             # the fields are reused (main.c tim4_slip)
+        sp_in, sp0, now = c["addr"], c["hfsr"], c.get("sp") or 0
+        return (f"{c['cause_name']}: {SLIP_KINDS.get(c['cfsr'], 'kind ' + str(c['cfsr']))}, in stage '{c['stage_name']}' after "
+                f"{c['up_ms'] / 1000:.1f} s up; TIM4 entry SP 0x{sp_in:08x}, its SP at the start 0x{sp0:08x} "
+                f"(frame {sp_in - sp0} bytes), now 0x{now:08x} (moved {now - sp0:+d}); interrupted: {running_in(c['psr'])} "
+                f"at PC 0x{c['pc']:08x} LR 0x{c['lr']:08x} xPSR 0x{c['psr']:08x} [early crashes in a row {c['count']}, total {c['total']}]")
     bits = []
     for bit, name in ((0, "instruction fetch from a no-execute region (MPU: a jump into RAM)"), (9, "precise bus error"), (8, "instruction bus error"), (16, "undefined instruction"), (17, "invalid state"),
                       (18, "bad EXC_RETURN"), (24, "unaligned access"), (25, "divide by zero"), (1, "data access violation")):
@@ -346,7 +376,7 @@ class Fire:
 
     def _open(self, now):
         try:
-            outs = [n for n in self.mido.get_output_names() if "ORC FW" in n]
+            outs = [n for n in self.mido.get_output_names() if ("FLAME seq" in n or "ORC FW seq" in n)]
         except Exception as e:                      # the ALSA sequencer can refuse a listing (e.g. mid-replug)
             warn_once(("fire", "names", type(e).__name__), f"cannot list MIDI ports ({e}); will keep trying")
             return False
@@ -354,7 +384,7 @@ class Fire:
             return False
         try:
             self.out = self.mido.open_output(outs[0])
-            ins = [n for n in self.mido.get_input_names() if "ORC FW" in n]
+            ins = [n for n in self.mido.get_input_names() if ("FLAME seq" in n or "ORC FW seq" in n)]
             self.inp = self.mido.open_input(ins[0]) if ins else None
         except Exception as e:
             warn_once(("fire", "open", type(e).__name__), f"cannot open the Fire ({e}); will keep trying")
@@ -448,6 +478,20 @@ def save_crash_report(_c):
     print("[firevu] saving the full crash report to ~/fire_fw/crashes/", flush=True)
 
 
+def use_midisafe(orc_dir):
+    """The ORC's fix for mido leaking ALSA sequencer clients (orc1/orc1_midisafe.py, 2026-11-09): mido 1.3.3 leaves
+    a client open whenever a port vanishes mid-listing or mid-open (a Fire replug or crash does exactly that), and
+    after ~64 of them NOTHING on the Pi can open MIDI. Used when the ORC is installed next to us; without it this
+    stays plain mido (this repo also runs on its own). Returns True when the fix is active."""
+    if orc_dir not in sys.path:
+        sys.path.append(orc_dir)                    # appended: never shadows anything of ours
+    try:
+        import orc1_midisafe
+        return bool(orc1_midisafe.install())
+    except Exception:
+        return False
+
+
 def idle_priority():
     """Skipback first: this must never compete with anything."""
     try:
@@ -471,6 +515,7 @@ def main(argv=None):
     if not args.dry:
         import mido as mido_mod
         mido = mido_mod
+        use_midisafe(os.path.expanduser("~/orc/orc1"))
     fire = Fire(mido, on_crash=save_crash_report) if mido else None
     src, meter = RingSource(args.root), Meter()
     st = {"started": args.start, "sent": 0}

@@ -1,7 +1,7 @@
 """Record the sequencer's note-ons for N seconds and report step-timing jitter."""
 import mido, sys, time, statistics
 secs = float(sys.argv[1]) if len(sys.argv) > 1 else 30
-name = next(n for n in mido.get_input_names() if 'ORC FW seq' in n)
+name = next(n for n in mido.get_input_names() if ('FLAME seq' in n or 'ORC FW seq' in n))
 i = mido.open_input(name)
 t0 = time.time(); kicks = []; notes = 0
 while time.time() - t0 < secs:

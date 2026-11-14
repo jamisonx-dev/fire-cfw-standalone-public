@@ -195,6 +195,9 @@ bool store2_step(uint32_t max_words)
 }
 
 bool store2_last_failed(void) { return W.failed; }
+uint32_t store2_words_done(void) { return W.active ? W.pos : 0; }
+uint32_t store2_words_total(void) { return W.active ? total_words() : 0; }
+const uint8_t *store2_busy_payload(void) { return W.active ? store_area + W.off + HDR : 0; }
 
 bool store2_append_src(int kind, uint32_t len, s2_reader rd, const void *ctx)
 {

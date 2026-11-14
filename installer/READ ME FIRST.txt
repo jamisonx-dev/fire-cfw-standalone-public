@@ -1,5 +1,5 @@
-AKAI FIRE CUSTOM FIRMWARE (v0.29b) - INSTALLER FOR WINDOWS
-==========================================================
+AKAI FIRE CUSTOM FIRMWARE "FLAME" (v0.39) - INSTALLER FOR WINDOWS, macOS AND LINUX
+=================================================================================
 
 What this does
 --------------
@@ -14,23 +14,41 @@ To install
 ----------
 1. Unzip this whole folder somewhere (Desktop is fine). Don't run it from inside the zip.
 2. Plug the Fire into the computer with USB. Close FL Studio and any other music program.
-3. Double-click  "Install custom firmware.bat".
-4. Follow the window. The first time, Windows shows an "allow changes" box for a USB driver: click Yes.
-   (If Windows says "Windows protected your PC", click "More info" then "Run anyway".)
-5. When it says DONE, the Fire restarts with the new firmware.
+3. Start the installer:
+   WINDOWS: double-click  "Install custom firmware.bat".
+            The first time, Windows shows an "allow changes" box for a USB driver: click Yes.
+            (If Windows says "Windows protected your PC", click "More info" then "Run anyway".)
+   macOS:   first install dfu-util once: in Terminal,  brew install dfu-util  (Homebrew: https://brew.sh)
+            Then double-click  "Install custom firmware.command"
+            (the first time macOS may refuse it: right-click it, choose Open, then Open again).
+            When it asks, put the Fire into update mode by hand (see "If something goes wrong", steps 1-3).
+   LINUX:   first install dfu-util once, e.g.  sudo apt install dfu-util
+            Then in a terminal, in this folder:  sh "Install custom firmware.command"
+            It asks for your password (dfu-util needs USB access).
+4. Follow the window. When it says DONE, the Fire restarts with the new firmware.
 
-The first time it starts, pattern 1 has a simple starter beat (kick, snare, hats on the first three rows) and
-the other 31 patterns are empty. The dim blue lines on the pads are beat marks (one every 4 steps); change or
+Updating from an earlier version: run Install again. It finds your saved patterns and asks:
+  K = keep them (the new firmware loads them), F = erase them, C = stop.
+Either way they are in the backup it makes first.
+
+On a fresh install, pattern 1 has a simple starter beat (kick, snare, hats on the first three rows) and the
+other 31 patterns are empty. The dim blue lines on the pads are beat marks (one every 4 steps); change or
 turn them off in BROWSER > Display.
 
 Your original firmware is saved in the "backups" folder as  ORIGINAL_Akai_firmware.bin
 KEEP THAT FILE (copy it somewhere safe too). It is the only copy of your Fire's original firmware.
 
+The Fire shows up as two MIDI ports: "FLAME seq" (the sequencer; on Windows 10 just "FLAME") and "FLAME DAW"
+(only for DAW mode; on Windows 10 "MIDIIN2 (FLAME)" / "MIDIOUT2 (FLAME)").
+
 
 To go back to Akai's firmware
 -----------------------------
-Double-click  "Restore original Akai firmware.bat"  (same folder, with the backups folder next to it).
-It saves what is on the Fire first (your patterns included), then puts Akai's firmware back exactly.
+Windows: double-click  "Restore original Akai firmware.bat".
+macOS:   double-click  "Restore original Akai firmware.command".
+Linux:   sh "Restore original Akai firmware.command"
+(Same folder, with the backups folder next to it.) It saves what is on the Fire first (your patterns
+included), then puts Akai's firmware back exactly.
 
 
 If something goes wrong
@@ -42,19 +60,20 @@ The Fire's startup program (Akai's bootloader) is never touched, so you can alwa
   4. Run Install or Restore again.
 If the Fire freezes or crashes while you play, it restarts itself.
 
-Questions or problems: open an issue on the project page above.
+Found a bug? Take a photo of BROWSER > About (the first screen) and open an issue on the project page above.
 
 
 What's in the "files" folder
 ----------------------------
-fire_tool.ps1             the script both .bat files run (plain text, readable)
-fire_custom_v0.29b.bin    the firmware, built from the project's public source
-dfu-util.exe              dfu-util 0.11, the standard open-source flashing tool (GPL-2.0)
+fire_tool.ps1             the Windows script both .bat files run (plain text, readable)
+fire_tool.sh              the macOS / Linux script both .command files run (plain text, readable)
+fire_custom_v0.39.bin     the firmware, built from the project's public source
+dfu-util.exe              Windows only: dfu-util 0.11, the standard open-source flashing tool (GPL-2.0)
                           https://dfu-util.sourceforge.net  (license: files\COPYING.dfu-util)
-qmk_driver_installer.exe  installs the WinUSB driver for update mode, from the QMK keyboard project (GPL-3.0)
-                          https://github.com/qmk/qmk_driver_installer
+qmk_driver_installer.exe  Windows only: installs the WinUSB driver for update mode, from the QMK keyboard
+                          project (GPL-3.0)  https://github.com/qmk/qmk_driver_installer
 
-Mac / Linux: no double-click version yet. With the Fire in update mode (button combo above) and dfu-util installed:
+By hand, with dfu-util and the Fire in update mode (what the scripts do, without their checks):
   back up:  dfu-util -a 0 -s 0x08000000:262144 -U my_fire_backup.bin
-  install:  dfu-util -a 0 -s 0x08008000:98304 -D fire_custom_v0.29b.bin
+  install:  dfu-util -a 0 -s 0x08008000:98304 -D fire_custom_v0.39.bin
   restart:  dfu-util -a 0 -s 0x08000000:leave

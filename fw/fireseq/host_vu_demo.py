@@ -3,8 +3,8 @@ import math, sys, time
 import mido
 
 secs = float(sys.argv[1]) if len(sys.argv) > 1 else 10
-name = next(n for n in mido.get_output_names() if "ORC FW" in n)
-iname = next(n for n in mido.get_input_names() if "ORC FW" in n)
+name = next(n for n in mido.get_output_names() if ("FLAME seq" in n or "ORC FW seq" in n))
+iname = next(n for n in mido.get_input_names() if ("FLAME seq" in n or "ORC FW seq" in n))
 out, inp = mido.open_output(name), mido.open_input(iname)
 HDR = [0x7D, 0x4F, 0x52, 0x43]
 
