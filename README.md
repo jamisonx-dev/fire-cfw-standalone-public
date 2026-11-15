@@ -2,15 +2,13 @@
 
 Finally, exactly what I wanted this thing to be in the first place. 
 
-**The Akai Fire is now a standalone step sequencer and includes:**
+**The Akai Fire is now a standalone sequencer/controller/control surface, and includes:**
 
 -internal clock with clock out and external sync 
 
 -patterns, assignments, and settings saved internally to the device memory
 
--step sequencer with 32 tracks: 24 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step)
-
--each individual sequencer track can be of any length from 1 to 128 steps and can be changed on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
+-step sequencer with 32 tracks: 24 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step). each individual sequencer track can be of any length from 1 to 128 steps, changable on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
 
 -accents, probability, ratchets: hold a step, then turn the knobs to adjust the likelihood that it will sound, whether any ratcheting occurs, and the gate length. accents can be adjusted by pressing shift+step and cycle between strong, soft, and normal.
 
@@ -24,7 +22,7 @@ Finally, exactly what I wanted this thing to be in the first place.
 
 -fader mode, which reimagines the pad grid as a display of horizontal faders that can be scrolled through, each with 16-step resolution 
 
--second midi port for daw/hardware control through MCU/HUI
+-a second midi port for daw/hardware control through MCU/HUI
 
 -generally informative context on the oled
 
@@ -34,9 +32,9 @@ Finally, exactly what I wanted this thing to be in the first place.
 
 -good-quality, meaningful button LED/pad lighting all around
 
--send & receive MIDI over USB to anything that is capable of speaking the language
+- the ability to send & receive MIDI over USB to anything that is capable of speaking the language
 
--easy installation and restore utilities included in the pack
+-easy installation and restore utilities, now for both Windows & Mac/Linux
 
 
 A note here about some of the things one might find in addition:
