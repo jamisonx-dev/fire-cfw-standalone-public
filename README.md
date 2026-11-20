@@ -41,7 +41,8 @@
 
 My personal copy of this firmware gets updated pretty often at this point and some of the features I put in for myself will leak into the public release. For example, pressing the DRUM key twice now goes into MPC mode, which is a map of my MPC1000 face buttons. It's a thing specific to me that I'm leaving until/unless this gets enough outside traction to make it worth removing. Another example is ORC mode, a menu option specific to the ORC project that allows the fire to be taken over and used as a remote, kind of like how FL Studio works with the original firmware. Poke around and you will find neat things, such as paint mode.
 
-*Regarding my ORC project and its connection to this* 
+*Regarding my ORC project and its connection to this*
+
 While both are standalone projects, the fire was initially decoded on its original firmware and used as a kind of screen/controller to interact with the ORC, a dedicated live instrument/ecosystem built for Linux that is designed without a display. That complete decoding and handler for the original fire firmware is available in my profile here, as are a few other potentially useful resources along these lines. If you do make your own ORC device, the old behavior is available through the ORC mode in the menu. It still feels like the prototype it is, but it allows the use of two sequencers in tandem plus a bunch of specific control modes for the chord engine,synths, etc.
 
 Some possible defaults in here (displaying the line markers in the seq, for example) may be confusing, but everything can be turned off/adjusted in the menu. 
