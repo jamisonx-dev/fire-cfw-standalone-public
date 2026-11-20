@@ -1,6 +1,6 @@
 # Akai Fire FLAME: A Custom Firmware Project
 
--*Finally, exactly what I wanted this thing to be in the first place.*- 
+-*Finally, exactly what I wanted this thing to be in the first place*- 
 
 **The Akai Fire is now a standalone sequencer/controller/control surface, and includes:**
 
