@@ -4,37 +4,37 @@
 
 **The Akai Fire is now a standalone sequencer/controller/control surface, and includes:**
 
--internal clock with clock out and external sync 
+- internal clock with clock out and external sync 
 
--patterns, assignments, and settings saved internally to the device memory
+- patterns, assignments, and settings saved internally to the device memory
 
--step sequencer with 32 tracks: 24 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step). each individual sequencer track can be of any length from 1 to 128 steps, changable on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
+- step sequencer with 32 tracks: 24 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step). each individual sequencer track can be of any length from 1 to 128 steps, changable on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
 
--accents, probability, ratchets: hold a step, then turn the knobs to adjust the likelihood that it will sound, whether any ratcheting occurs, and the gate length. accents can be adjusted by pressing shift+step and cycle between strong, soft, and normal.
+- accents, probability, ratchets: hold a step, then turn the knobs to adjust the likelihood that it will sound, whether any ratcheting occurs, and the gate length. accents can be adjusted by pressing shift+step and cycle between strong, soft, and normal.
 
--32 patterns, autosaved. if a new pattern is selected, the change happens at the end of the bar, regardless of how many steps a given sequencer track may contain.
+- 32 patterns, autosaved. if a new pattern is selected, the change happens at the end of the bar, regardless of how many steps a given sequencer track may contain.
 
--song mode, where you can string the patterns together however you wish
+- song mode, where you can string the patterns together however you wish
 
--note mode, where the notes are laid out like the fretboard of a bass guitar
+- note mode, where the notes are laid out like the fretboard of a bass guitar
 
--drum mode with four 16 pad grids side-by-side, each independently assignable, and a 16 Levels mode to get around the velocity limitations of the fire
+- drum mode with four 16 pad grids side-by-side, each independently assignable, and a 16 Levels mode to get around the velocity limitations of the fire
 
--fader mode, which reimagines the pad grid as a display of horizontal faders that can be scrolled through, each with 16-step resolution 
+- fader mode, which reimagines the pad grid as a display of horizontal faders that can be scrolled through, each with 16-step resolution 
 
--a second midi port for daw/hardware control through MCU/HUI
+- a second midi port for daw/hardware control through MCU/HUI
 
--generally informative context on the oled
+- generally informative context on the oled
 
--4 banks of the four encoder knobs for each of the main modes you're in (apart from fader and MCU/HUI/DAW mode), assignable in the menu to whatever you want them to send
+- 4 banks of the four encoder knobs for each of the main modes you're in (apart from fader and MCU/HUI/DAW mode), assignable in the menu to whatever you want them to send
 
--universal control surface mode, entered by pressing NOTE twice, provides an initially blank slate that allows easy mapping of each of the fire's 64 pads to whatever midi signal, whatever value, toggle/momentary, up to 8 pages deep with 4 banks of mappable knobs per page
+- universal control surface mode, entered by pressing NOTE twice, provides an initially blank slate that allows easy mapping of each of the fire's 64 pads to whatever midi signal, whatever value, toggle/momentary, up to 8 pages deep with 4 banks of mappable knobs per page
 
--good-quality, meaningful button LED/pad lighting all around
+- good-quality, meaningful button LED/pad lighting all around
 
 - the ability to send & receive MIDI over USB to anything that is capable of speaking the language
 
--easy installation and restore utilities, now for both Windows & Mac/Linux
+- easy installation and restore utilities, now for both Windows & Mac/Linux
 
 
 A note here about some of the things one might find in addition:
