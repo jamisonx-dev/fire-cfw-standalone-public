@@ -169,26 +169,53 @@ function Enter-UpdateMode {
         }
         Say 'The Fire is in update mode.' 'Green'
     }
-    if (-not (WaitFor { DfuUsable } 3)) {
-        Say ''
-        Say 'Windows needs a one-time USB driver (WinUSB) for update mode.' 'Cyan'
-        Say 'A Windows "allow changes" box will pop up next: click Yes. This takes up to a minute.'
-        $list = Join-Path $env:TEMP 'fire_drivers.txt'
-        Set-Content -Path $list -Encoding ASCII -Value 'winusb,STM32 Bootloader,0483,DF11,6d98a87f-4ecf-464d-89ed-8c684d857a75'
-        try { Start-Process -FilePath $Drivers -ArgumentList @('--force', "`"$list`"") -Verb RunAs -Wait }
-        catch { Fail 'the driver install was cancelled.' }
-        if (-not (WaitFor { DfuUsable } 20)) { Fail 'the driver went in but the flashing tool still cannot see the Fire. Unplug it, plug it back in (holding the four buttons) and run this again.' }
-        Say 'Driver ready.' 'Green'
+    if (-not (WaitFor { DfuUsable } 3)) { Install-Driver 'Windows needs a one-time USB driver (WinUSB) for update mode.' }
+}
+function Install-Driver([string]$why) {
+    Say ''
+    Say $why 'Cyan'
+    Say 'A Windows "allow changes" box will pop up next: click Yes. This takes up to a minute.'
+    $list = Join-Path $env:TEMP 'fire_drivers.txt'
+    Set-Content -Path $list -Encoding ASCII -Value 'winusb,STM32 Bootloader,0483,DF11,6d98a87f-4ecf-464d-89ed-8c684d857a75'
+    try { Start-Process -FilePath $Drivers -ArgumentList @('--force', "`"$list`"") -Verb RunAs -Wait }
+    catch { Fail 'the driver install was cancelled.' }
+    if (-not (WaitFor { DfuUsable } 20)) { Fail 'the driver went in but the flashing tool still cannot see the Fire. Unplug it, plug it back in (holding the four buttons) and run this again.' }
+    Say 'Driver ready.' 'Green'
+}
+# Called right before every read and write. The Fire can drop off USB while update mode sits idle (Windows power
+# saving, a loose cable, a long wait at a question) and come back under a different driver, which dfu-util cannot
+# use: "Cannot open DFU device 0483:df11 ... (LIBUSB_ERROR_NOT_SUPPORTED)", seen on a tester's Windows 11 laptop
+# 2026-11-20 right after two good reads. Reconnect (and put WinUSB back) instead of stopping.
+function Ensure-Connected {
+    if (DfuUsable) { return }
+    Say ''
+    Say 'The connection to the Fire dropped. Reconnecting...' 'Yellow'
+    if (-not (WaitFor { DfuPresent } 5)) {
+        Say 'The Fire is no longer in update mode. Please:' 'Cyan'
+        Say '  1. Unplug the Fire''s USB cable.'
+        Say '  2. Hold down STEP + NOTE + DRUM + PERFORM (the four buttons bottom left).'
+        Say '  3. Keep holding them and plug the cable back in. Let go after 2 seconds.'
+        Say 'Waiting up to 2 minutes...'
+        if (-not (WaitFor { DfuPresent } 120)) { Fail 'the Fire did not come back in update mode.' }
     }
+    if (WaitFor { DfuUsable } 3) { Say 'Reconnected.' 'Green'; return }
+    Install-Driver 'Windows gave the Fire a different USB driver. Putting the right one (WinUSB) back.'
+}
+function NeverOpened([string]$out) {   # dfu-util could not get hold of the Fire at all, so it read / wrote nothing
+    return ($out -match 'Cannot open DFU device|No DFU capable USB device')
 }
 
 function Read-Chip([string]$file) {
-    if (Test-Path $file) { Remove-Item $file -Force }
-    $out = RunDfu -a 0 -s ('0x08000000:{0}' -f $ChipSize) -U $file
-    if (-not (Test-Path $file) -or (Get-Item $file).Length -ne $ChipSize) {
-        Say $out 'DarkGray'; Fail 'could not read the Fire''s memory.'
+    for ($try = 1; $try -le 2; $try++) {
+        Ensure-Connected
+        if (Test-Path $file) { Remove-Item $file -Force }
+        $out = RunDfu -a 0 -s ('0x08000000:{0}' -f $ChipSize) -U $file
+        if ((Test-Path $file) -and (Get-Item $file).Length -eq $ChipSize) { return [IO.File]::ReadAllBytes($file) }
+        Say $out 'DarkGray'
+        if ($try -eq 1 -and (NeverOpened $out)) { Say 'Could not reach the Fire. Trying again...' 'Yellow'; continue }
+        break
     }
-    return [IO.File]::ReadAllBytes($file)
+    Fail 'could not read the Fire''s memory.'
 }
 function Same([byte[]]$a, [int]$ao, [byte[]]$b, [int]$bo, [int]$n) {
     for ($i = 0; $i -lt $n; $i++) { if ($a[$ao + $i] -ne $b[$bo + $i]) { return $false } }
@@ -212,9 +239,17 @@ function IsBlank([byte[]]$b, [int]$o, [int]$n) {
     return $true
 }
 function Write-Area([string]$file, [int]$len) {
-    $out = RunDfu -a 0 -s ('0x{0:X8}:{1}' -f $AppAddr, $len) -D $file
-    if ($script:DfuExit -ne 0) { Say $out 'DarkGray'; return $false }
-    return $true
+    for ($try = 1; $try -le 2; $try++) {
+        Ensure-Connected
+        $out = RunDfu -a 0 -s ('0x{0:X8}:{1}' -f $AppAddr, $len) -D $file
+        if ($script:DfuExit -eq 0) { return $true }
+        Say $out 'DarkGray'
+        # Retry only when dfu-util never got hold of the Fire (nothing written). A write that failed part way stops,
+        # as before: Akai's bootloader is never touched, so Install or Restore can always run again.
+        if ($try -eq 1 -and (NeverOpened $out)) { Say 'Could not reach the Fire. Trying again...' 'Yellow'; continue }
+        break
+    }
+    return $false
 }
 function Leave-UpdateMode {
     RunDfu -a 0 -s 0x08000000:leave | Out-Null
