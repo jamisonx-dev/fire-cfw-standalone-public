@@ -1,0 +1,92 @@
+name: Problem installing or restoring
+description: The installer or the restore stopped, showed an error, or the Fire didn't come back right.
+title: "Install problem: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sorry it gave you trouble! Your Fire is very unlikely to be harmed: the installer backs up the whole Fire first,
+        and **Restore original Akai firmware** always puts Akai's firmware back.
+
+        **Please post this here on the website, not by replying to a GitHub email:** pictures sent by email reply get lost.
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot or photo of the installer window
+      description: |
+        Drag it here or paste it. Please show the whole window, especially any red text or the line that starts with "STOPPED:".
+        Or copy and paste the text from the window.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: action
+    attributes:
+      label: What were you running?
+      options:
+        - Install custom firmware
+        - Restore original Akai firmware
+        - Flashing by hand with dfu-util
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Which computer?
+      options:
+        - Windows 11
+        - Windows 10
+        - Windows (other / not sure)
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: Version of the computer's system (if you know it)
+      description: e.g. "macOS 14 Sonoma", "Ubuntu 24.04", "Raspberry Pi OS"
+
+  - type: dropdown
+    id: before
+    attributes:
+      label: What was on the Fire before you started?
+      options:
+        - Akai's original firmware (it worked with FL Studio)
+        - An earlier version of this custom firmware (e.g. v0.29b)
+        - I don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: version
+    attributes:
+      label: Which version were you installing?
+      description: It's in the name of the zip you downloaded.
+      # RELEASE STEP: put the new public release first.
+      options:
+        - v0.39
+        - I don't know
+
+  - type: dropdown
+    id: fire-now
+    attributes:
+      label: What is the Fire doing now?
+      options:
+        - It works with the new firmware
+        - It still has what it had before
+        - The screen is blank / pads dark
+        - It only shows up as a USB update device
+        - I don't know
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Anything else?
+      description: For example, how far it got, whether you clicked Yes to the driver box, whether the Fire was plugged into a USB hub.
