@@ -43,7 +43,7 @@ My personal copy of this firmware gets updated pretty often at this point and so
 
 *Regarding my ORC project and its connection to this*
 
-While both are standalone projects, the fire was initially decoded on its original firmware and used as a kind of screen/controller to interact with the ORC, a dedicated live instrument/ecosystem built for Linux that is designed to be used without a display. That complete decoding and handler for the original fire firmware is available in my profile here, as are a few other potentially useful resources along these lines. If you do make your own ORC device, the old behavior is available through the ORC mode in the menu. It still feels like the prototype it is, but it allows the use of two sequencers in tandem plus a bunch of specific control modes for the chord engine,synths, etc.
+While both are standalone projects, the fire was initially decoded on its original firmware and used as a kind of screen/controller to interact with the ORC, a dedicated live instrument/ecosystem/problem solver built for Linux that is designed to be used without a display. That complete decoding and handler for the original fire firmware is available in my profile here, as are a few other potentially useful resources along these lines. If you do make your own ORC device, the old behavior is available through the ORC mode in the menu. It still feels like the prototype it is, but it allows the use of two sequencers in tandem plus a bunch of specific control modes for the chord engine,synths, etc.
 
 Some possible defaults in here (displaying the line markers in the seq, for example) may be confusing, but everything can be turned off/adjusted in the menu. 
 
