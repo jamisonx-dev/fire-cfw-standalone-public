@@ -8,7 +8,13 @@
 
 - patterns, assignments, and settings saved internally to the device memory
 
-- step sequencer with 32 tracks: 24 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step). each individual sequencer track can be of any length from 1 to 128 steps, changable on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed.
+- step sequencer with 32 tracks: 24 drum (single note and/or cc per step) and 8 melodic tracks (expands capability to 3 notes per step). 
+
+-Each individual sequencer track can be sent to any midi channel/note/cc by holding the green mute beside it and turning the knobs. 
+
+- Each sequencer track can be of any length from 1 to 128 steps, changable on the fly by pressing alt+the desired last step for that row. Tracks can stretch up to 8 pages in length if needed. [If switching to another pattern, the change will occur at the end of the current bar. In song mode, press the rightmost green pad in the bottom row for all 128 steps to be able to play out before the next section starts]
+
+- Automatically assigns notes played to the next empty sequencer track if record is enabled
 
 - accents, probability, ratchets: hold a step, then turn the knobs to adjust the likelihood that it will sound, whether any ratcheting occurs, and the gate length. accents can be adjusted by pressing shift+step and cycle between strong, soft, and normal.
 
